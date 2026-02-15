@@ -1,4 +1,4 @@
-"""Connectivity metrics extracted from the core engine module."""
+"""Метрики связности, выделенные из основного движка анализа."""
 
 from __future__ import annotations
 
@@ -19,12 +19,12 @@ from ..config import DEFAULT_BINS, DEFAULT_K_MI, DEFAULT_MAX_LAG, PYINFORM_AVAIL
 
 
 def correlation_matrix(data: pd.DataFrame, lag: int = 1, control: Optional[list[str]] = None, **_: dict) -> np.ndarray:
-    """Compute the Pearson correlation matrix for numeric columns."""
+    """Вычисляет матрицу корреляции Пирсона для числовых колонок."""
     return data.corr().values
 
 
 def partial_correlation_matrix(df: pd.DataFrame, lag: int = 1, control: Optional[list[str]] = None, **_: dict) -> np.ndarray:
-    """Compute partial correlation matrix using the precision-matrix approach."""
+    """Вычисляет матрицу частных корреляций через матрицу точности."""
     cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     n_cols = len(cols)
     out = np.eye(n_cols)
@@ -48,12 +48,12 @@ def partial_correlation_matrix(df: pd.DataFrame, lag: int = 1, control: Optional
 
 
 def partial_h2_matrix(df: pd.DataFrame, lag: int = 1, control: Optional[list[str]] = None, **kwargs: dict) -> np.ndarray:
-    """Compute squared partial correlation matrix (H² partial proxy)."""
+    """Вычисляет квадрат частной корреляции (приближение частного H²)."""
     return partial_correlation_matrix(df, lag=lag, control=control, **kwargs) ** 2
 
 
 def lagged_directed_correlation(df: pd.DataFrame, lag: int = 1, control: Optional[list[str]] = None, **_: dict) -> np.ndarray:
-    """Compute directed lagged correlation matrix where M[src, tgt] = corr(src(t), tgt(t+lag))."""
+    """Вычисляет направленную лаговую корреляцию, где M[src, tgt] = corr(src(t), tgt(t+lag))."""
     lag = int(max(1, lag))
     cols = list(df.columns)
     n_cols = len(cols)
@@ -142,7 +142,7 @@ def _knn_conditional_mutual_info(x: np.ndarray, y: np.ndarray, z: np.ndarray, k:
 
 
 def mutual_info_matrix(data: pd.DataFrame, lag: int = 1, control: Optional[list[str]] = None, k: int = DEFAULT_K_MI, **_: dict) -> np.ndarray:
-    """Compute pairwise mutual information matrix using KSG kNN estimator."""
+    """Вычисляет попарную матрицу взаимной информации оценкой KSG kNN."""
     n_vars = len(data.columns)
     mi_matrix = np.zeros((n_vars, n_vars), dtype=float)
     for i in range(n_vars):
@@ -157,7 +157,7 @@ def mutual_info_matrix(data: pd.DataFrame, lag: int = 1, control: Optional[list[
 
 
 def mutual_info_matrix_partial(data: pd.DataFrame, lag: int = 1, control: Optional[list[str]] = None, k: int = DEFAULT_K_MI, **_: dict) -> np.ndarray:
-    """Compute conditional mutual information matrix I(X;Y|Z)."""
+    """Вычисляет матрицу условной взаимной информации I(X;Y|Z)."""
     cols = list(data.columns)
     n_cols = len(cols)
     pmi = np.zeros((n_cols, n_cols), dtype=float)
@@ -177,7 +177,7 @@ def mutual_info_matrix_partial(data: pd.DataFrame, lag: int = 1, control: Option
 
 
 def coherence_matrix(data: pd.DataFrame, lag: int = 1, control: Optional[list[str]] = None, fs: float = 1.0, **_: dict) -> np.ndarray:
-    """Compute average spectral coherence for each variable pair."""
+    """Вычисляет среднюю спектральную когерентность для каждой пары переменных."""
     fs = fs if np.isfinite(fs) and fs > 0 else 1.0
     n_vars = data.shape[1]
     coh = np.full((n_vars, n_vars), np.nan, dtype=float)
@@ -205,7 +205,7 @@ def coherence_matrix(data: pd.DataFrame, lag: int = 1, control: Optional[list[st
 
 
 def granger_matrix(df: pd.DataFrame, lag: int = DEFAULT_MAX_LAG, control: Optional[list[str]] = None, **_: dict) -> np.ndarray:
-    """Compute directed Granger p-value matrix using pairwise tests."""
+    """Вычисляет матрицу p-value теста Грейнджера по попарным проверкам."""
     n_cols = df.shape[1]
     out = np.full((n_cols, n_cols), 1.0)
     columns = df.columns.tolist()
@@ -227,7 +227,7 @@ def granger_matrix(df: pd.DataFrame, lag: int = DEFAULT_MAX_LAG, control: Option
 
 
 def granger_matrix_partial(df: pd.DataFrame, lag: int = DEFAULT_MAX_LAG, control: Optional[list[str]] = None, **_: dict) -> np.ndarray:
-    """Compute conditional Granger causality p-values via multivariate VAR."""
+    """Вычисляет условную причинность Грейнджера (p-value) через многомерную VAR."""
     columns = list(df.columns)
     n_cols = len(columns)
     out = np.full((n_cols, n_cols), np.nan, dtype=float)
@@ -291,7 +291,7 @@ def _transfer_entropy_discrete(source_d: np.ndarray, target_d: np.ndarray, k: in
 
 
 def compute_te_jitter(source: np.ndarray, target: np.ndarray, lag: int = 1, bins: int = DEFAULT_BINS) -> float:
-    """Compute transfer entropy with z-scoring, tiny jittering, and quantile discretization."""
+    """Вычисляет Transfer Entropy с использованием z-score, jitter и квантильной дискретизации."""
 
     def _zscore_1d(x: np.ndarray) -> np.ndarray:
         x = np.asarray(x, dtype=np.float64).ravel()
@@ -335,12 +335,12 @@ def compute_te_jitter(source: np.ndarray, target: np.ndarray, lag: int = 1, bins
             return float(pyinform.transfer_entropy(source_discrete, target_discrete, k=k))
         return _transfer_entropy_discrete(source_discrete, target_discrete, k=k)
     except Exception as exc:
-        logging.error("[TE] Computation error: %s", exc)
+        logging.error("[TE] Ошибка вычисления: %s", exc)
         return float("nan")
 
 
 def transfer_entropy_matrix(df: pd.DataFrame, lag: int = 1, control: Optional[list[str]] = None, bins: int = DEFAULT_BINS, **_: dict) -> np.ndarray:
-    """Compute directed transfer entropy matrix M[src, tgt] = TE(src -> tgt)."""
+    """Вычисляет направленную матрицу Transfer Entropy M[src, tgt] = TE(src -> tgt)."""
     n_cols = df.shape[1]
     out = np.zeros((n_cols, n_cols))
     for src in range(n_cols):
@@ -356,7 +356,7 @@ def transfer_entropy_matrix(df: pd.DataFrame, lag: int = 1, control: Optional[li
 
 
 def transfer_entropy_matrix_partial(df: pd.DataFrame, lag: int = 1, control: Optional[list[str]] = None, bins: int = DEFAULT_BINS, **_: dict) -> np.ndarray:
-    """Compute approximate partial transfer entropy via linear residualization."""
+    """Вычисляет приближенную частную Transfer Entropy через линейную резидуализацию."""
     cols = list(df.columns)
     n_cols = len(cols)
     out = np.zeros((n_cols, n_cols))
