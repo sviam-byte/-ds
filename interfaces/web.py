@@ -1,252 +1,91 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 """
 Веб-интерфейс (Streamlit) для Time Series Analysis Tool.
-
-Light Streamlit demo.
-В облаке НЕ генерим полный Excel (слишком тяжело). Полный отчёт — через cli.py локально.
-Также НЕ импортируем модули на уровне модуля (cold start в Streamlit Cloud).
+Локальный режим.
 """
 
-from __future__ import annotations
-
 import os
-import shutil
 import sys
 import tempfile
 from pathlib import Path
-from types import ModuleType
-from typing import List, Mapping, Sequence
 
 import streamlit as st
 
-# Добавляем путь к src в sys.path
+# Добавляем путь к src
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-
-def _tool() -> ModuleType:
-    """Ленивая загрузка heavy-модуля для Streamlit Cloud."""
-    from src.core import engine
-    return engine
-
-
-def _resolve_selected_methods(selected: Sequence[str], mapping: Mapping[str, object]) -> List[str]:
-    """Оставляет только методы, которые реально доступны в mapping."""
-    return [m for m in selected if m in mapping]
-
-
-def _is_cloud_env() -> bool:
-    """Пытаемся определить облачную среду Streamlit, чтобы не грузить тяжелые экспорты."""
-    return (
-        os.getenv("STREAMLIT_CLOUD") == "true"
-        or os.getenv("STREAMLIT_RUNTIME_ENV") == "cloud"
-        or os.getenv("STREAMLIT_SHARING") == "true"
-    )
+from src.core import engine
+from src.config import EXPERIMENTAL_METHODS, STABLE_METHODS
 
 
 def main() -> None:
-    """Запускает Streamlit UI."""
-    st.set_page_config(page_title="Time Series Connectivity Demo", layout="wide")
-    st.title("Time Series Connectivity Demo")
-    st.caption("Демо: heatmap/connectome. Полный Excel — локально: `python cli.py <file>`")
+    st.set_page_config(page_title="Анализ Временных Рядов (Локально)", layout="wide")
+    st.title("Анализ Связности Временных Рядов")
+    st.caption("Локальная версия. Загрузите файл CSV или Excel.")
 
-    uploaded_file = st.file_uploader("Upload CSV/XLSX", type=["csv", "xlsx"])
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        lag = st.number_input("Lag", min_value=1, max_value=50, value=1, step=1)
-    with col2:
-        threshold = st.number_input(
-            "Weight threshold",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.2,
-            step=0.05,
-        )
-    with col3:
-        normalize = st.checkbox("normalize", value=True)
+    uploaded_file = st.file_uploader("Выберите файл", type=["csv", "xlsx"])
 
+    with st.expander("Параметры анализа", expanded=True):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            lag = st.number_input("Лаг (Lag)", min_value=1, max_value=50, value=1)
+        with col2:
+            threshold = st.number_input("Порог графа (Threshold)", 0.0, 1.0, 0.2, 0.05)
+        with col3:
+            normalize = st.checkbox("Нормализация (Z-score)", value=True)
 
-    # Для p-value (Granger full / directed) нужен отдельный порог
-    alpha = st.number_input(
-        "p-value alpha (for Granger p-values)",
-        min_value=1e-6,
-        max_value=0.5,
-        value=0.05,
-        format="%.6f",
-    )
+        alpha = st.number_input("P-value alpha (для Granger)", 0.0001, 0.5, 0.05, format="%.4f")
 
-    st.subheader("Input parsing")
-    header_mode = st.selectbox("Header", ["auto", "yes", "no"], index=0)
-    time_col_mode = st.selectbox("Time column", ["auto", "none"], index=0)
-    transpose_mode = st.selectbox("Transpose", ["auto", "yes", "no"], index=0)
+    all_methods = STABLE_METHODS + EXPERIMENTAL_METHODS
+    selected_methods = st.multiselect("Выберите методы", all_methods, default=STABLE_METHODS[:2])
 
-    st.subheader("Preprocessing")
-    preprocess_enabled = st.checkbox("Enable preprocessing", value=True)
-
-    col4, col5, col6 = st.columns(3)
-    with col4:
-        remove_outliers = st.checkbox("outliers", value=True)
-    with col5:
-        log_transform = st.checkbox("log", value=False)
-    with col6:
-        quiet_warnings = st.checkbox("quiet warnings", value=False)
-
-    tool = _tool()
-    tool.configure_warnings(quiet=quiet_warnings)
-    if not tool.PYINFORM_AVAILABLE:
-        st.info("pyinform не установлен: TE будет считаться через fallback (дискретизация). Для TE через pyinform поставь pyinform локально.")
-
-    method_options = tool.STABLE_METHODS + tool.EXPERIMENTAL_METHODS
-    selected_methods = st.multiselect(
-        "Methods",
-        options=method_options,
-        default=[m for m in tool.STABLE_METHODS if m in method_options],
-    )
-
-    if any(method in tool.EXPERIMENTAL_METHODS for method in selected_methods):
-        st.warning("Часть выбранных методов помечена как experimental.")
-
-    is_cloud = _is_cloud_env()
-    generate_excel = False
-    generate_html = True
-    generate_site = False
-
-    st.subheader("Diagnostics (HTML)")
-    include_diagnostics = st.checkbox("Include initial analysis block", value=True)
-    diagnostics_max_series = st.number_input("Max series to show", min_value=1, max_value=50, value=8, step=1)
-    diagnostics_max_pairs = st.number_input("Max pairs for frequency dependence", min_value=0, max_value=100, value=6, step=1)
-    colA, colB = st.columns(2)
-    with colA:
-        include_adf = st.checkbox("ADF stationarity", value=True)
-        include_hurst = st.checkbox("Hurst (RS/DFA/AggVar/Wavelet)", value=True)
-        include_seasonality = st.checkbox("Seasonality", value=True)
-        include_entropy = st.checkbox("Entropy (SampleEn)", value=True)
-    with colB:
-        include_fft = st.checkbox("FFT / power spectrum", value=True)
-        include_ac_ph = st.checkbox("AC & PH", value=True)
-        include_frequency_summary = st.checkbox("Frequency summary", value=True)
-        include_frequency_dependence = st.checkbox("Frequency dependence (coherence)", value=True)
-
-    if is_cloud:
-        st.info("В облаке полный Excel-отчёт отключён (слишком тяжело для Streamlit Cloud).")
-    else:
-        generate_excel = st.checkbox(
-            "Generate full Excel report (slow)",
-            value=False,
-            help="Создаёт полный отчёт. Может занять время и много памяти.",
-        )
-    generate_html = st.checkbox("Generate HTML report (fast)", value=True)
-    if not is_cloud:
-        generate_site = st.checkbox("Generate mini-site report (zip)", value=False)
-
-    if st.button("Run", type="primary"):
+    if st.button("Запустить анализ", type="primary"):
         if not uploaded_file:
-            st.error("Сначала загрузите файл CSV/XLSX.")
+            st.error("Файл не загружен!")
             return
 
-        suffix = os.path.splitext(uploaded_file.name)[1] or ".csv"
         with tempfile.TemporaryDirectory() as tmp_dir:
-            input_path = os.path.join(tmp_dir, f"input{suffix}")
-            output_path = os.path.join(tmp_dir, "AllMethods_Full.xlsx")
-
+            input_path = os.path.join(tmp_dir, uploaded_file.name)
             with open(input_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
-            enable_experimental = any(m in tool.EXPERIMENTAL_METHODS for m in selected_methods)
-            engine = tool.BigMasterTool(enable_experimental=enable_experimental)
-            engine.lag_ranges = {v: range(1, lag + 1) for v in tool.method_mapping}
+            tool = engine.BigMasterTool()
 
-            with st.spinner("Обработка данных..."):
-                engine.load_data_excel(
-                    input_path,
-                    header=header_mode,
-                    time_col=time_col_mode,
-                    transpose=transpose_mode,
-                    preprocess=preprocess_enabled,
-                    log_transform=log_transform,
-                    remove_outliers=remove_outliers,
-                    normalize=normalize,
-                    fill_missing=True,
-                    check_stationarity=False,
-                )
-                engine.run_all_methods()
-                html_path = os.path.join(tmp_dir, "report.html")
-                site_dir = os.path.join(tmp_dir, "site_report")
-                site_zip = os.path.join(tmp_dir, "site_report.zip")
-                if generate_excel:
-                    engine.export_big_excel(
-                        output_path,
-                        threshold=threshold,
-                        p_value_alpha=alpha,
-                        window_size=100,
-                        overlap=50,
-                        log_transform=log_transform,
-                        remove_outliers=remove_outliers,
-                        normalize=normalize,
-                        fill_missing=True,
-                        check_stationarity=False,
-                    )
-                if generate_html:
-                    engine.export_html_report(html_path, graph_threshold=threshold, p_alpha=float(alpha), include_diagnostics=include_diagnostics, diagnostics_max_series=int(diagnostics_max_series), diagnostics_max_pairs=int(diagnostics_max_pairs), include_adf=include_adf, include_hurst=include_hurst, include_seasonality=include_seasonality, include_fft=include_fft, include_ac_ph=include_ac_ph, include_entropy=include_entropy, include_frequency_summary=include_frequency_summary, include_frequency_dependence=include_frequency_dependence)
-                if generate_site:
-                    engine.export_site_report(site_dir, graph_threshold=threshold, p_alpha=float(alpha), zip_path=site_zip)
+            with st.spinner("Загрузка и обработка..."):
+                try:
+                    tool.load_data_excel(input_path, normalize=normalize, fill_missing=True)
 
-            resolved_methods = _resolve_selected_methods(selected_methods, tool.method_mapping)
-            if not resolved_methods:
-                st.info("Методы не выбраны или недоступны.")
-                return
+                    tool.run_selected_methods(selected_methods, max_lag=lag)
 
-            st.subheader("Heatmaps")
-            for method in resolved_methods[:3]:
-                matrix = tool.compute_connectivity_variant(engine.data_normalized, method, lag=lag)
-                heatmap = tool.plot_heatmap(matrix, f"{method} Heatmap", legend_text=f"Lag={lag}")
-                st.image(heatmap, caption=method)
+                    excel_path = os.path.join(tmp_dir, "report.xlsx")
+                    html_path = os.path.join(tmp_dir, "report.html")
 
-            st.subheader("Connectome")
-            primary_method = resolved_methods[0]
-            matrix = tool.compute_connectivity_variant(engine.data_normalized, primary_method, lag=lag)
-            directed = tool.is_directed_method(primary_method)
-            invert = tool.is_pvalue_method(primary_method)
-            thr = float(alpha) if invert else threshold
-            connectome = tool.plot_connectome(
-                matrix,
-                f"{primary_method} Connectome",
-                threshold=thr,
-                directed=directed,
-                invert_threshold=invert,
-                legend_text=f"Lag={lag}",
-            )
-            st.image(connectome, caption=primary_method)
+                    tool.export_big_excel(excel_path, threshold=threshold, p_value_alpha=alpha)
+                    tool.export_html_report(html_path, graph_threshold=threshold, p_alpha=alpha)
 
-            if generate_excel:
-                with open(output_path, "rb") as f:
-                    st.download_button(
-                        "Download Excel",
-                        data=f.read(),
-                        file_name="AllMethods_Full.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
-            if generate_html:
-                with open(html_path, "rb") as f:
-                    st.download_button(
-                        "Download HTML report",
-                        data=f.read(),
-                        file_name="report.html",
-                        mime="text/html",
-                    )
-            if generate_site and (not is_cloud):
-                with open(site_zip, "rb") as f:
-                    st.download_button(
-                        "Download mini-site (zip)",
-                        data=f.read(),
-                        file_name="site_report.zip",
-                        mime="application/zip",
-                    )
-            else:
-                st.caption(
-                    "Полный Excel-отчёт: `python cli.py <file> --lags N --graph-threshold T` (локально)"
-                )
+                    st.success("Готово!")
+
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        with open(excel_path, "rb") as f:
+                            st.download_button("Скачать Excel", f, "report.xlsx")
+                    with c2:
+                        with open(html_path, "rb") as f:
+                            st.download_button("Скачать HTML", f, "report.html")
+
+                    st.subheader("Предварительный просмотр")
+                    for method in selected_methods:
+                        if method in tool.results and tool.results[method] is not None:
+                            st.write(f"**{method}**")
+                            from src.visualization import plots
+
+                            buf = plots.plot_heatmap(tool.results[method], f"{method} (Lag={lag})")
+                            st.image(buf, caption=method)
+
+                except Exception as e:
+                    st.error(f"Ошибка выполнения: {e}")
+                    import traceback
+
+                    st.text(traceback.format_exc())
 
 
 if __name__ == "__main__":
