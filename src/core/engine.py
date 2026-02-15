@@ -1937,7 +1937,9 @@ class BigMasterTool:
 
         self.data_normalized: pd.DataFrame = pd.DataFrame()
         self.results: dict = {}
+        self.results_meta: dict = {}
         self.variant_lags: dict = {}
+        self.window_analysis: dict = {}
         self.config: AnalysisConfig = config or AnalysisConfig(enable_experimental=enable_experimental)
 
         # Настройки
@@ -2005,13 +2007,26 @@ class BigMasterTool:
             return
 
         self.results = {}
+        # Метаданные (лаг, окна, partial-контроль и т.п.) — чтобы отчёты могли
+        # объяснять пользователю «что именно было исключено/подобрано».
+        self.results_meta = {}
+        self.variant_lags = {}
+        self.window_analysis = {}
+
         for variant in method_mapping.keys():
             logging.info("Расчет метода: %s...", variant)
             try:
-                self.results[variant] = compute_connectivity_variant(self.data_normalized, variant, lag=1)
+                mat, meta = self._compute_variant_auto(variant, **kwargs)
+                self.results[variant] = mat
+                self.results_meta[variant] = meta
+                if meta.get("chosen_lag") is not None:
+                    self.variant_lags[variant] = int(meta["chosen_lag"])
+                if meta.get("window") is not None:
+                    self.window_analysis[variant] = meta["window"]
             except Exception as e:
                 logging.error("Ошибка в методе %s: %s", variant, e)
                 self.results[variant] = None
+                self.results_meta[variant] = {"error": str(e)}
 
         self._apply_fdr_correction()
         logging.info("Все расчеты завершены.")
@@ -2023,21 +2038,144 @@ class BigMasterTool:
         """
         self.normalize_data()
         self.results = {}
-        used_lags = {}
+        self.results_meta = {}
+        self.window_analysis = {}
 
+        # max_lag аргументом оставляем, но если задан self.config.max_lag —
+        # берём максимум из них (чтобы не ломать старые вызовы).
+        self.config.max_lag = int(max(self.config.max_lag, int(max_lag)))
+
+        used_lags: Dict[str, int] = {}
         for variant in variants:
             if variant not in method_mapping:
                 continue
-            # Здесь можно добавить логику подбора лага, пока берем 1 или max_lag
-            lag = 1  # Упрощение для стабильности
             try:
-                self.results[variant] = compute_connectivity_variant(self.data_normalized, variant, lag=lag)
-                used_lags[variant] = lag
+                mat, meta = self._compute_variant_auto(variant, **kwargs)
+                self.results[variant] = mat
+                self.results_meta[variant] = meta
+                if meta.get("chosen_lag") is not None:
+                    used_lags[variant] = int(meta["chosen_lag"])
+                if meta.get("window") is not None:
+                    self.window_analysis[variant] = meta["window"]
             except Exception as e:
                 logging.error("Ошибка %s: %s", variant, e)
+                self.results[variant] = None
+                self.results_meta[variant] = {"error": str(e)}
 
         self.variant_lags = used_lags
         return used_lags
+
+    def _compute_variant_auto(self, variant: str, **kwargs) -> tuple[np.ndarray | None, dict]:
+        """Единая точка расчёта: лаг (fixed/optimize) + окна (none/best/mean).
+
+        Архитектуру сохраняем: наружу по-прежнему отдаём матрицу, но параллельно
+        собираем meta для отчётов.
+        """
+        df = self.data_normalized
+        if df is None or df.empty:
+            return None, {"error": "empty data"}
+
+        # --- partial controls description ---
+        meta: dict = {"variant": variant}
+        if is_control_sensitive_method(variant):
+            # В текущей реализации (pairwise_policy='others' по умолчанию) это значит:
+            # для пары (Xi, Xj) исключаем влияние всех остальных переменных.
+            meta["partial"] = {
+                "mode": kwargs.get("partial_mode", "pairwise"),
+                "pairwise_policy": kwargs.get("pairwise_policy", "others"),
+                "custom_controls": kwargs.get("custom_controls"),
+                "explain": "Для каждой пары (Xi, Xj) исключено линейное влияние набора control.",
+            }
+
+        # --- lag selection ---
+        supports_lag = is_directed_method(variant) or variant.startswith("granger") or variant.startswith("te_") or variant.startswith("ah_")
+        lag_sel = (kwargs.get("lag_selection") or self.config.lag_selection or "optimize").lower()
+        max_lag = int(kwargs.get("max_lag") or self.config.max_lag or 1)
+        max_lag = int(max(1, max_lag))
+
+        def _compute_at_lag(d: pd.DataFrame, lag: int) -> np.ndarray | None:
+            return compute_connectivity_variant(
+                d,
+                variant,
+                lag=int(max(1, lag)),
+                control=kwargs.get("control"),
+                partial_mode=kwargs.get("partial_mode", "pairwise"),
+                pairwise_policy=kwargs.get("pairwise_policy", "others"),
+                custom_controls=kwargs.get("custom_controls"),
+            )
+
+        chosen_lag = 1
+        if not supports_lag:
+            chosen_lag = 1
+        elif lag_sel == "fixed":
+            chosen_lag = int(max(1, kwargs.get("lag", 1)))
+        else:
+            # optimize
+            best_score = float("-inf")
+            best_lag = 1
+            for lag in range(1, max_lag + 1):
+                mat = _compute_at_lag(df, lag)
+                score = _lag_quality(variant, mat)
+                if np.isfinite(score) and float(score) > best_score:
+                    best_score = float(score)
+                    best_lag = int(lag)
+            chosen_lag = int(best_lag)
+            meta["lag_optimization"] = {
+                "max_lag": int(max_lag),
+                "criterion": "mean(|offdiag|)" if not is_pvalue_method(variant) else "mean(-log10(p))",
+            }
+        meta["chosen_lag"] = int(chosen_lag)
+
+        # --- windowing ---
+        window_sizes = kwargs.get("window_sizes") or self.config.window_sizes
+        if not window_sizes:
+            mat = _compute_at_lag(df, chosen_lag)
+            return mat, meta
+
+        policy = (kwargs.get("window_policy") or self.config.window_policy or "best").lower()
+        window_sizes = [int(w) for w in window_sizes if int(w) >= 2]
+        stride_override = kwargs.get("window_stride") or self.config.window_stride
+
+        mats = []
+        best = None
+        best_q = float("-inf")
+
+        for w in window_sizes:
+            stride = int(stride_override) if stride_override is not None else int(max(1, w // 5))
+            w_info = analyze_sliding_windows_with_metric(df, variant, window_size=w, stride=stride, lag=chosen_lag)
+            if not w_info:
+                continue
+            # best window for this w
+            bw = w_info.get("best_window")
+            if bw and bw.get("matrix") is not None:
+                mats.append(np.asarray(bw["matrix"]))
+                q = float(bw.get("metric", float("nan")))
+                if np.isfinite(q) and q > best_q:
+                    best_q = q
+                    best = {
+                        "window_size": int(w),
+                        "stride": int(stride),
+                        "best_window": bw,
+                        "curve": w_info.get("curve"),
+                    }
+
+        if not mats:
+            mat = _compute_at_lag(df, chosen_lag)
+            return mat, meta
+
+        if policy == "mean":
+            # усредняем по матрицам лучших окон каждого размера
+            mat = np.nanmean(np.stack(mats, axis=0), axis=0)
+        else:
+            # best
+            mat = np.asarray(best["best_window"]["matrix"]) if best else np.asarray(mats[0])
+
+        meta["window"] = {
+            "sizes": window_sizes,
+            "policy": policy,
+            "best": best,
+        }
+        return mat, meta
 
     def export_html_report(self, output_path: str, **kwargs) -> str:
         """Генерация HTML отчета через внешний класс."""
@@ -2059,6 +2197,8 @@ class BigMasterTool:
         for col in self.data.columns:
             series = self.data[col]
             adf_stat, adf_p = analysis_stats.test_stationarity(series)
+            season = analysis_stats.detect_seasonality(series)
+            fft_pk = analysis_stats.fft_peaks(series, top_k=3)
             diagnostics[col] = {
                 "adf_stat": adf_stat,
                 "adf_p": adf_p,
@@ -2067,6 +2207,10 @@ class BigMasterTool:
                 "hurst_aggvar": analysis_stats.compute_hurst_aggvar(series),
                 "hurst_wavelet": analysis_stats.compute_hurst_wavelet(series),
                 "sample_entropy": analysis_stats.compute_sample_entropy(series),
+                "shannon_entropy": analysis_stats.shannon_entropy(series),
+                "permutation_entropy": analysis_stats.permutation_entropy(series, order=3, delay=1, normalize=True),
+                "seasonality": season,
+                "fft_peaks": fft_pk,
             }
         return diagnostics
 

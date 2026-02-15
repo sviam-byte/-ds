@@ -172,6 +172,20 @@ class AnalysisConfig:
     # Поправка на множественные сравнения: 'none' | 'fdr_bh'.
     pvalue_correction: str = "none"
 
+    # --- Connectivity tuning ---
+    # Если задано, расчёты могут выполняться на скользящих окнах.
+    # В результирующую матрицу по методу попадёт "лучшая" матрица (см. window_policy).
+    window_sizes: list[int] | None = None
+    # Шаг окна (в точках). Если None — дефолт = max(1, window_size//5).
+    window_stride: int | None = None
+    # Политика агрегации по окнам: 'best' | 'mean'.
+    window_policy: str = "best"
+
+    # Подбор лага: 'fixed' | 'optimize'
+    # - fixed: используем lag=1 (или явно заданный)
+    # - optimize: перебираем 1..max_lag и выбираем лучший по quality-score
+    lag_selection: str = "optimize"
+
 def is_pvalue_method(variant: str) -> bool:
     """Проверяет, является ли метод p-value методом."""
     return variant.lower() in PVAL_METHODS

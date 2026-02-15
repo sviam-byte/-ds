@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import AnalysisConfig, SAVE_FOLDER
 from src.core.engine import BigMasterTool
+from src.core.variant_presets import expand_variants
+from src.io.user_input import build_run_spec, parse_user_input
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,6 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-dir", help="Directory to save results (default: same as input or 'results')")
     p.add_argument("--auto-difference", action="store_true", help="Auto-difference non-stationary series")
     p.add_argument("--pvalue-correction", choices=["none", "fdr_bh"], default="none", help="Multiple testing correction for p-values")
+    p.add_argument("--user-config", default="", help="User run config (JSON/dict/key=value;...) for variant presets and tuning")
+    p.add_argument("--interactive-config", action="store_true", help="Read run config interactively from stdin")
     return p
 
 
@@ -48,7 +52,43 @@ def _process_single_file(filepath: str, args: argparse.Namespace, out_dir: str) 
 
     tool = BigMasterTool(config=cfg)
     tool.load_data_excel(filepath)
-    tool.run_all_methods()
+
+    # Важно для совместимости:
+    # - если пользовательский конфиг НЕ задан, оставляем старое поведение run_all_methods().
+    # - если конфиг задан, запускаем выборочные варианты с пресетами/тюнингом.
+    user_text = (args.user_config or "").strip()
+    if args.interactive_config:
+        print("\n[Input] Примеры:")
+        print("  preset=full")
+        print("  variants=mutinf_full,te_directed; max_lag=12; lag_selection=optimize")
+        print('  {"preset":"causal","window_sizes":[256,512],"max_lag":12}')
+        print("  {'preset':'basic','window_sizes':'256,512','window_policy':'best'}")
+        print("Пусто -> дефолты.\n")
+        user_text = input("Config> ").strip()
+
+    if user_text:
+        user_cfg = parse_user_input(user_text)
+        spec = build_run_spec(user_cfg, default_max_lag=int(getattr(tool.config, "max_lag", args.lags)))
+        variants, explain = expand_variants(spec.variants)
+
+        print("\n[Plan] Как будет считаться:")
+        print(explain)
+        print(spec.explain())
+        print()
+
+        tool.run_selected_methods(
+            variants,
+            max_lag=spec.max_lag,
+            lag_selection=spec.lag_selection,
+            window_sizes=spec.window_sizes,
+            window_stride=spec.window_stride,
+            window_policy=spec.window_policy,
+            partial_mode=spec.partial_mode,
+            pairwise_policy=spec.pairwise_policy,
+            custom_controls=spec.custom_controls,
+        )
+    else:
+        tool.run_all_methods()
 
     name = Path(filepath).stem
     os.makedirs(out_dir, exist_ok=True)
