@@ -25,10 +25,6 @@ from pathlib import Path
 from itertools import chain, combinations, permutations
 from typing import Dict, List, Optional, Tuple
 
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import networkx as nx
 import numpy as np
 import pandas as pd
 import scipy.signal as signal
@@ -85,6 +81,15 @@ def _nolds_or_warn() -> bool:
 
 # Импорты из нашей новой структуры
 from ..config import *
+from ..analysis import stats as analysis_stats
+from ..metrics import connectivity
+from ..metrics.registry import METRICS_REGISTRY, get_metric_func, register_metric
+from ..reporting import ExcelReportWriter, HTMLReportGenerator
+from ..visualization import plots
+
+# Reuse pyplot from visualization module to keep plotting backend centralized.
+plt = plots.plt
+
 from .data_loader import load_or_generate
 from .preprocessing import configure_warnings
 
@@ -1019,13 +1024,8 @@ def plot_individual_ac_ph(data: pd.DataFrame, title: str) -> dict:
 # sample entropy
 ##############################################
 def compute_sample_entropy(series: pd.Series) -> float:
-    try:
-        if not _nolds_or_warn():
-            return np.nan
-        return float(nolds.sampen(series.dropna().values))
-    except Exception as ex:
-        logging.error(f"[Sample Entropy] Ошибка: {ex}")
-        return np.nan
+    """Compatibility wrapper for sample entropy computation."""
+    return analysis_stats.compute_sample_entropy(series)
 
 
 def _as_float64_1d(x) -> np.ndarray:
@@ -1096,99 +1096,20 @@ def add_raw_data_sheet(wb: Workbook, df: pd.DataFrame) -> None:
         ws.append(list(row))
 
 def plot_heatmap(matrix: np.ndarray, title: str, legend_text: str = "", annotate: bool = False, vmin=None, vmax=None) -> BytesIO:
-    fig, ax = plt.subplots(figsize=(4, 3.2))
-    
-    if matrix is None or not isinstance(matrix, np.ndarray) or matrix.size == 0:
-        ax.text(0.5, 0.5, "Error\n(No Data)", ha='center', va='center', color='red', fontsize=12)
-        ax.set_xticks([])
-        ax.set_yticks([])
-    else:
-        # Фиксируем шкалу, чтобы избежать авто-нормализации matplotlib.
-        cax = ax.imshow(matrix, cmap="viridis", aspect="auto", vmin=vmin, vmax=vmax)
-        fig.colorbar(cax, ax=ax)
-        ax.set_title(title, fontsize=10)
-        
-        # Аннотации
-        if annotate and matrix.shape[0] < 10:
-            min_val = vmin if vmin is not None else np.nanmin(matrix)
-            max_val = vmax if vmax is not None else np.nanmax(matrix)
-            
-            if np.isfinite(min_val) and np.isfinite(max_val) and max_val > min_val:
-                threshold = min_val + (max_val - min_val) / 2.0
-            else:
-                threshold = 0.5 # запасной вариант
-
-            for i in range(matrix.shape[0]):
-                for j in range(matrix.shape[1]):
-                    val = matrix[i, j]
-                    if np.isnan(val):
-                        display_val, color = "NaN", "red"
-                    else:
-                        display_val = f"{val:.2f}"
-                        # Цвет текста зависит от порога, который выч отдельно. от 0,5 НЕ ВОЗВРАЩАТЬ
-                        color = "white" if val < threshold else "black"
-                    ax.text(j, i, display_val, ha="center", va="center", color=color, fontsize=8)
-
-    if legend_text:
-        ax.text(0.05, 0.95, legend_text, transform=ax.transAxes, fontsize=8,
-                verticalalignment='top', bbox=dict(facecolor='white', alpha=0.5))
-    
-    buf = BytesIO()
-    plt.tight_layout()
-    plt.savefig(buf, format="png", dpi=150)
-    buf.seek(0)
-    plt.close(fig)
-    return buf
+    """Compatibility wrapper around src.visualization.plots.plot_heatmap."""
+    return plots.plot_heatmap(matrix, title, legend_text=legend_text, annotate=annotate, vmin=vmin, vmax=vmax)
 
 def plot_connectome(matrix: np.ndarray, method_name: str, threshold: float = 0.2,
                     directed: bool = False, invert_threshold: bool = False, legend_text: str = "") -> BytesIO:
-    n = matrix.shape[0]
-    G = nx.DiGraph() if directed else nx.Graph()
-    G.add_nodes_from(range(n))
-    # ВАЖНО: договоримся об ориентации:
-    # matrix[src, tgt] — влияние src -> tgt
-    if directed:
-        for src in range(n):
-            for tgt in range(n):
-                if src == tgt:
-                    continue
-                w = matrix[src, tgt]
-                if w is None or np.isnan(w):
-                    continue
-                if invert_threshold:
-                    # p-value: меньше => сильнее
-                    if w < threshold:
-                        G.add_edge(src, tgt, weight=float(w))
-                else:
-                    if abs(w) > threshold:
-                        G.add_edge(src, tgt, weight=float(w))
-    else:
-        for i in range(n):
-            for j in range(i + 1, n):
-                w = matrix[i, j]
-                if w is None or np.isnan(w):
-                    continue
-                if abs(w) > threshold:
-                    G.add_edge(i, j, weight=float(w))
-    pos = nx.circular_layout(G)
-    fig, ax = plt.subplots(figsize=(4, 4))
-    if directed:
-        nx.draw_networkx_nodes(G, pos, ax=ax, node_color="lightblue", node_size=500)
-        nx.draw_networkx_labels(G, pos, ax=ax)
-        nx.draw_networkx_edges(G, pos, ax=ax, arrowstyle="->", arrowsize=10)
-    else:
-        nx.draw_networkx(G, pos, ax=ax, node_color="lightblue", node_size=500)
-    ax.set_title(f"Connectome: {method_name}")
-    if legend_text:
-         ax.text(0.05, 0.05, legend_text, transform=ax.transAxes, fontsize=8,
-                 verticalalignment='bottom', bbox=dict(facecolor='white', alpha=0.5))
-    ax.axis("off")
-    buf = BytesIO()
-    plt.tight_layout()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
-    plt.close(fig)
-    return buf
+    """Compatibility wrapper around src.visualization.plots.plot_connectome."""
+    return plots.plot_connectome(
+        matrix,
+        method_name,
+        threshold=threshold,
+        directed=directed,
+        invert_threshold=invert_threshold,
+        legend_text=legend_text,
+    )
 
 def add_method_to_sheet(ws, row: int, title: str, matrix: np.ndarray, directed: bool = False, legend_text: str = "") -> int:
     ws.append([title])
@@ -1267,47 +1188,30 @@ def apply_pvalue_correction_matrix(mat: np.ndarray, directed: bool) -> np.ndarra
 #
 # МАППИНГ
 ###
-method_mapping = {
-    # ——— Correlation ———
-    "correlation_full":     lambda data, lag=None, control=None: correlation_matrix(data),
-    "correlation_partial":  lambda data, lag=None, control=None: partial_correlation_matrix(data, control),
-    "correlation_directed": lambda data, lag, control=None: lagged_directed_correlation(data, lag),
+# Metric registry lives in src.metrics.registry to keep engine as orchestrator.
+method_mapping = dict(METRICS_REGISTRY)
 
-    # ——— H² (squared corr) ———
-    "h2_full":              lambda data, lag=None, control=None: correlation_matrix(data)**2,
-    "h2_partial":           lambda data, lag=None, control=None: partial_h2_matrix(data, control), 
-    "h2_directed":          lambda data, lag, control=None: lagged_directed_h2(data, lag),
-
-    # ——— Mutual Information ———
-    "mutinf_full":          lambda data, lag=0, control=None: mutual_info_matrix(data, k=DEFAULT_K_MI),
-    "mutinf_partial":       lambda data, lag=0, control=None: mutual_info_matrix_partial(data, control, k=DEFAULT_K_MI),
-
-    # ——— Coherence ———
-    "coherence_full":       lambda data, lag=None, control=None: coherence_matrix(data),
+# AH methods are still implemented in this module, so they are registered here.
+def _metric_ah_full(data: pd.DataFrame, lag: int = 1, control=None, **kwargs) -> np.ndarray:
+    return AH_matrix(data)
 
 
-# ...
-    # ——— Granger causality ———
-    "granger_full":         lambda data, lag, control=None: _compute_granger_matrix_internal(data, lags=lag),
-    "granger_partial":      lambda data, lag, control=None: granger_matrix_partial(data, maxlag=lag, control=control), 
-    "granger_directed":     lambda data, lag, control=None: _compute_granger_matrix_internal(data, lags=lag),
-# ...
-
-    # ——— Transfer entropy ———
-    "te_full":    lambda data, lag, control=None: TE_matrix(data, lag=lag),
-    "te_partial": lambda data, lag, control=None: TE_matrix_partial(data, lag=lag, control=control, bins=DEFAULT_BINS),
-    "te_directed":lambda data, lag, control=None: TE_matrix(data, lag=lag, bins=DEFAULT_BINS),
+def _metric_ah_partial(data: pd.DataFrame, lag: int = 1, control=None, **kwargs) -> np.ndarray:
+    return compute_partial_AH_matrix(data, max_lag=lag, control=control)
 
 
-    # ——— AH (non‑linear) ———
-    "ah_full":              lambda data, lag=None, control=None: AH_matrix(data),
-    "ah_partial":           lambda data, lag, control=None: compute_partial_AH_matrix(data, max_lag=lag, control=control),
-    "ah_directed":          lambda data, lag, control=None:
-                                (AH_matrix(data)
-                                 if not control
-                                 else compute_partial_AH_matrix(data, max_lag=lag, control=control)),
-}
+def _metric_ah_directed(data: pd.DataFrame, lag: int = 1, control=None, **kwargs) -> np.ndarray:
+    return AH_matrix(data) if not control else compute_partial_AH_matrix(data, max_lag=lag, control=control)
 
+
+for _name, _func in {
+    "ah_full": _metric_ah_full,
+    "ah_partial": _metric_ah_partial,
+    "ah_directed": _metric_ah_directed,
+}.items():
+    register_metric(_name, _func)
+
+method_mapping = dict(METRICS_REGISTRY)
 
 
 @dataclass(frozen=True)
@@ -1612,9 +1516,10 @@ def compute_connectivity_variant(
             # условной постановки и другого API.
 
         if variant in method_mapping:
-            return method_mapping[variant](data, lag, control)
+            metric_func = get_metric_func(variant)
+            return metric_func(data, lag=lag, control=control)
 
-        return correlation_matrix(data)
+        return connectivity.correlation_matrix(data)
     except Exception as e:
         logging.error(f"[ComputeVariant] Метод {variant} не работает: {e}")
         return None
@@ -2010,7 +1915,7 @@ def create_table_of_contents(wb: Workbook):
 # Класс BigMasterTool 
 ##############################################
 class BigMasterTool:
-    def __init__(self, data: pd.DataFrame = None, enable_experimental: bool = False) -> None:
+    def __init__(self, data: pd.DataFrame = None, enable_experimental: bool = False, config: Optional[AnalysisConfig] = None) -> None:
         if data is not None:
             # Удаляем полностью константные колонки (точное равенство всем значениям первой строки)
             try:
@@ -2038,12 +1943,13 @@ class BigMasterTool:
         self.lag_results: dict = {}
         self.fft_results: dict = {}
         self.data_type: str = 'unknown'
-        self.enable_experimental = enable_experimental
+        self.config: AnalysisConfig = config or AnalysisConfig(enable_experimental=enable_experimental)
+        self.enable_experimental = self.config.enable_experimental
         # Частота дискретизации (Гц) для FFT/когерентности/частотных отчётов.
         # По умолчанию fs=1.0: частоты интерпретируются как "циклы на отсчёт".
         self.fs: float = 1.0
         self.variant_lags: dict = {}
-        self.lag_ranges = {v: range(1, 21) for v in method_mapping}
+        self.lag_ranges = {v: range(1, int(self.config.max_lag) + 1) for v in method_mapping}
         # Контрольные наборы для partial-методов: стратегия и предохранитель от экспоненты
         # strategy: 'all_others' (по умолчанию), 'none', 'powerset'
         self.control_strategy: str = 'all_others'
@@ -2109,7 +2015,8 @@ class BigMasterTool:
         logging.info(f"[BigMasterTool] Данные загружены, shape = {self.data.shape}.")
         return self.data
 
-    def normalize_data(self):
+    def normalize_data(self) -> None:
+        """Standardize numeric data with z-score normalization in-place for analysis cache."""
         if self.data is None or self.data.empty or self.data.shape[1] == 0:
             logging.warning("[BigMasterTool] normalize_data: нет данных для нормализации.")
             self.data_normalized = pd.DataFrame()
@@ -2495,7 +2402,11 @@ class BigMasterTool:
 
         return dict(self.variant_lags)
 
-    def export_html_report(
+    def export_html_report(self, output_path: str, **kwargs) -> str:
+        """Generate HTML report using the dedicated reporting package."""
+        return HTMLReportGenerator(self).generate(output_path, **kwargs)
+
+    def _export_html_report_impl(
         self,
         output_path: str,
         *,
@@ -3175,82 +3086,25 @@ def run_selected_methods(
 
 
     def compute_hurst_rs(self, series) -> float:
-        try:
-            H, _, _ = compute_Hc(series.dropna().values, kind='change', simplified=True)
-            return H
-        except Exception as ex:
-            logging.error(f"[Hurst RS] Ошибка: {ex}")
-            return np.nan
+        """Compute Hurst exponent using R/S method."""
+        return analysis_stats.compute_hurst_rs(series)
 
     def compute_hurst_dfa(self, series) -> float:
-        try:
-            if not _nolds_or_warn():
-                return np.nan
-            H = nolds.dfa(series.dropna().values)
-            return float(H)
-        except Exception as ex:
-            logging.error(f"[Hurst DFA] Ошибка: {ex}")
-            return np.nan
+        """Compute Hurst exponent using DFA."""
+        return analysis_stats.compute_hurst_dfa(series)
 
     def compute_hurst_aggregated_variance(self, series, max_n=100) -> float:
-        try:
-            arr = np.array(series.dropna())
-            N = len(arr)
-            if N < max_n:
-                return np.nan
-            m_vals = np.arange(1, min(max_n+1, N//2))
-            variances = []
-            for m in m_vals:
-                nb = N // m
-                if nb > 0:
-                    reshaped = arr[:nb*m].reshape(nb, m)
-                    block_means = reshaped.mean(axis=1)
-                    if len(block_means) > 1:
-                        variances.append(np.var(block_means))
-            if not variances: return np.nan
-            log_m = np.log10(m_vals[:len(variances)])
-            log_var = np.log10(variances)
-            slope, _ = np.polyfit(log_m, log_var, 1)
-            H = 1 - slope/2
-            return H
-        except Exception as ex:
-            logging.error(f"[Hurst AggVar] Ошибка: {ex}")
-            return np.nan
+        """Compute Hurst exponent using aggregated variance method."""
+        return analysis_stats.compute_hurst_aggvar(series, max_n=max_n)
 
     def compute_hurst_wavelet(self, series) -> float:
-        try:
-            arr = np.array(series.dropna())
-            N = len(arr)
-            if N < 50:
-                return np.nan
-            yf_arr = fft(arr)
-            freqs = np.fft.fftfreq(N)
-            psd = np.abs(yf_arr)**2
-            idx = freqs > 0
-            freqs = freqs[idx]
-            psd = psd[idx]
-            if len(freqs) < 2: return np.nan
-            log_freqs = np.log10(freqs)
-            log_psd = np.log10(psd)
-            slope, _ = np.polyfit(log_freqs, log_psd, 1)
-            H = (1 - slope)/2
-            return H
-        except Exception as ex:
-            logging.error(f"[Hurst Wavelet] Ошибка: {ex}")
-            return np.nan
+        """Compute Hurst proxy from wavelet-like PSD slope."""
+        return analysis_stats.compute_hurst_wavelet(series)
     #графики?
 
 def compute_sample_entropy(self, x) -> float:
-    """Sample entropy (устойчиво): принимает array/Series, возвращает float или NaN."""
-    try:
-        arr = np.asarray(x, dtype=np.float64).reshape(-1)
-        arr = arr[np.isfinite(arr)]
-        if arr.size < 20 or np.std(arr) < 1e-10:
-            return np.nan
-        return float(nolds.sampen(arr))
-    except Exception as ex:
-        logging.error(f"[Sample Entropy] Ошибка: {ex}")
-        return np.nan
+    """Compatibility wrapper for instance-level sample entropy calls."""
+    return analysis_stats.compute_sample_entropy(pd.Series(x))
 
     def plot_autocorrelation(self, series: pd.Series, title: str, suppress_noise: bool = False, noise_threshold: float = 0.9, legend_text: str = "") -> BytesIO:
         fig, ax = plt.subplots(figsize=(6, 4))
@@ -3706,7 +3560,11 @@ def compute_sample_entropy(self, x) -> float:
             cell = f"D{ws.max_row}"
             ws.add_image(img, cell)
 
-    def export_big_excel(self, save_path: str = "AllMethods_Full.xlsx", threshold: float = 0.2, p_value_alpha: float = DEFAULT_PVALUE_ALPHA, window_size: int = 100, overlap: int = 50,
+    def export_big_excel(self, save_path: str = "AllMethods_Full.xlsx", **kwargs) -> str:
+        """Generate Excel report using the dedicated reporting package."""
+        return ExcelReportWriter(self).write(save_path, **kwargs)
+
+    def _export_big_excel_impl(self, save_path: str = "AllMethods_Full.xlsx", threshold: float = 0.2, p_value_alpha: float = DEFAULT_PVALUE_ALPHA, window_size: int = 100, overlap: int = 50,
                            log_transform=False, remove_outliers=True, normalize=True, fill_missing=True, check_stationarity=False, include_pairwise_sheets: bool = True) -> str:
         wb = Workbook()
         wb.remove(wb.active)
@@ -3773,19 +3631,20 @@ def compute_sample_entropy(self, x) -> float:
         return save_path
 
     def test_stationarity(self, col: str, use_normalized: bool = False):
+        """Run stationarity diagnostics for a selected column."""
         data = self.data_normalized if use_normalized else self.data
         if col not in data.columns or not pd.api.types.is_numeric_dtype(data[col]):
             return None, None
-        arr = data[col].dropna()
-        if len(arr) < 2:
-            return None, None
-        try:
-            adf_res = adfuller(arr)
-            logging.debug(f"[Stationarity] {col}: ADF = {adf_res[0]:.6f}, p = {adf_res[1]:.6f}")
-            return adf_res[0], adf_res[1]
-        except Exception as ex:
-            logging.error(f"Ошибка ADF для {col}: {ex}")
-            return None, None
+        return analysis_stats.test_stationarity(data[col])
+
+    def get_diagnostics(self, col_name: str) -> dict:
+        """Aggregate core statistical diagnostics for one column."""
+        series = self.data[col_name]
+        return {
+            "adf": analysis_stats.test_stationarity(series),
+            "hurst": analysis_stats.compute_hurst_rs(series),
+            "entropy": analysis_stats.compute_sample_entropy(series),
+        }
 
     def evaluate_noise(self, col: str, use_normalized: bool = False):
         return 0, 0  # ЗАГЛУШКА
@@ -4886,267 +4745,4 @@ if __name__ == "__main__":
 
     print("Анализ завершён, результаты сохранены в:", output_path)
 
-
-############################################################
-# HOTFIX: missing BigMasterTool methods
-#
-# A previous patch introduced an indentation regression that
-# effectively "closed" the BigMasterTool class too early.
-# The HTML diagnostics expects these methods to exist.
-#
-# We restore them here in a backward-compatible way via
-# monkey-patching: if the attribute is missing, we add it.
-############################################################
-
-
-def _bmt_test_stationarity(self, col: str, use_normalized: bool = False):
-    """ADF test: returns (statistic, pvalue) or (None, None)."""
-    data = self.data_normalized if use_normalized else self.data
-    if data is None or data.empty:
-        return None, None
-    if col not in data.columns or not pd.api.types.is_numeric_dtype(data[col]):
-        return None, None
-    arr = pd.to_numeric(data[col], errors="coerce").dropna().values
-    if arr.size < 3:
-        return None, None
-    try:
-        stat, pval = adfuller(arr)[:2]
-        return float(stat), float(pval)
-    except Exception as ex:
-        logging.error(f"[ADF] {col}: {ex}")
-        return None, None
-
-
-def _bmt_compute_sample_entropy(self, x) -> float:
-    """Sample entropy (nolds.sampen). Returns NaN on failure."""
-    try:
-        if not _nolds_or_warn():
-            return float("nan")
-        arr = np.asarray(x, dtype=np.float64).reshape(-1)
-        arr = arr[np.isfinite(arr)]
-        if arr.size < 20:
-            return float("nan")
-        if np.nanstd(arr) < 1e-12:
-            return float("nan")
-        return float(nolds.sampen(arr))
-    except Exception as ex:
-        logging.error(f"[Sample Entropy] {ex}")
-        return float("nan")
-
-
-def _bmt_detect_seasonality(self, series: pd.Series, threshold: float = 0.2):
-    """FFT peak search: returns (peak_freqs, periods) or (None, None)."""
-    try:
-        s = pd.to_numeric(series, errors="coerce").dropna().values.astype(np.float64)
-        if s.size < 8:
-            return None, None
-        # remove mean to reduce DC
-        s = s - np.mean(s)
-        yf = fft(s)
-        # fs can accidentally be stored as an array/scalar-like; make it a clean float.
-        fs_raw = getattr(self, "fs", 1.0)
-        try:
-            fs_arr = np.asarray(fs_raw)
-            if fs_arr.ndim == 0:
-                fs = float(fs_arr)
-            elif fs_arr.size == 1:
-                fs = float(fs_arr.reshape(-1)[0])
-            else:
-                fs = 1.0
-        except Exception:
-            fs = 1.0
-        fs = fs if np.isfinite(fs) and fs > 0 else 1.0
-        freqs = np.fft.fftfreq(int(s.size), d=1.0 / fs)
-        amp = np.abs(yf) ** 2
-        idx = freqs > 0
-        freqs = freqs[idx]
-        amp = amp[idx]
-        if amp.size == 0 or not np.isfinite(amp).any():
-            return None, None
-        h = threshold * np.nanmax(amp)
-        peaks, props = find_peaks(amp, height=h)
-        if peaks.size == 0:
-            return None, None
-        peak_freqs = freqs[peaks]
-        # avoid division by 0
-        peak_freqs = peak_freqs[np.isfinite(peak_freqs) & (peak_freqs > 0)]
-        if peak_freqs.size == 0:
-            return None, None
-        periods = 1.0 / peak_freqs
-        return peak_freqs, periods
-    except Exception as ex:
-        logging.error(f"[Seasonality] {ex}")
-        return None, None
-
-
-def _bmt__coerce_1d_numeric(series_like):
-    """Robustly coerce input to a 1D float64 numpy array."""
-    try:
-        s = pd.to_numeric(series_like, errors="coerce")
-        if isinstance(s, pd.DataFrame):
-            # take first column
-            s = s.iloc[:, 0]
-        if isinstance(s, (pd.Series, pd.Index)):
-            arr = s.to_numpy()
-        else:
-            arr = np.asarray(s)
-        arr = np.asarray(arr, dtype=np.float64)
-        if arr.ndim == 0:
-            arr = arr.reshape(1)
-        else:
-            arr = arr.reshape(-1)
-        # drop NaNs
-        arr = arr[np.isfinite(arr)]
-        return arr
-    except Exception:
-        arr = np.asarray(series_like)
-        arr = np.asarray(arr, dtype=np.float64).reshape(-1)
-        arr = arr[np.isfinite(arr)]
-        return arr
-
-
-def _bmt_compute_hurst_rs(self, series) -> float:
-    """Hurst via rescaled range (R/S)."""
-    try:
-        arr = _bmt__coerce_1d_numeric(series)
-        if arr.size < 20:
-            return np.nan
-        # Prefer `hurst` package if available.
-        try:
-            H, _, _ = compute_Hc(arr, kind="change", simplified=True)
-            return float(H)
-        except Exception:
-            # Fallback: nolds.hurst_rs
-            if not _nolds_or_warn():
-                return np.nan
-            return float(nolds.hurst_rs(arr))
-    except Exception as ex:
-        logging.error(f"[Hurst RS] {ex}")
-        return np.nan
-
-
-def _bmt_compute_hurst_dfa(self, series) -> float:
-    """Hurst via DFA."""
-    try:
-        arr = _bmt__coerce_1d_numeric(series)
-        if arr.size < 20:
-            return np.nan
-        if not _nolds_or_warn():
-            return np.nan
-        return float(nolds.dfa(arr))
-    except Exception as ex:
-        logging.error(f"[Hurst DFA] {ex}")
-        return np.nan
-
-
-def _bmt_compute_hurst_aggvar(self, series, max_n: int = 100) -> float:
-    """Hurst via aggregated variance method."""
-    try:
-        arr = _bmt__coerce_1d_numeric(series)
-        N = int(arr.size)
-        if N < 50:
-            return np.nan
-        max_n = int(max_n) if max_n is not None else 100
-        max_n = max(10, min(max_n, N // 2))
-        m_vals = np.arange(1, max_n + 1)
-        variances = []
-        used_m = []
-        for m in m_vals:
-            nb = N // m
-            if nb <= 1:
-                continue
-            reshaped = arr[: nb * m].reshape(nb, m)
-            block_means = reshaped.mean(axis=1)
-            if block_means.size <= 1:
-                continue
-            v = np.var(block_means)
-            if np.isfinite(v) and v > 0:
-                variances.append(v)
-                used_m.append(m)
-        if len(variances) < 2:
-            return np.nan
-        log_m = np.log10(np.asarray(used_m, dtype=np.float64))
-        log_var = np.log10(np.asarray(variances, dtype=np.float64))
-        slope, _ = np.polyfit(log_m, log_var, 1)
-        H = 1.0 - float(slope) / 2.0
-        return float(H)
-    except Exception as ex:
-        logging.error(f"[Hurst AggVar] {ex}")
-        return np.nan
-
-
-def _bmt_compute_hurst_wavelet(self, series) -> float:
-    """Hurst proxy via log-log PSD slope (rough wavelet-like heuristic)."""
-    try:
-        arr = _bmt__coerce_1d_numeric(series)
-        N = int(arr.size)
-        if N < 50:
-            return np.nan
-        arr = arr - np.mean(arr)
-        yf = fft(arr)
-        freqs = np.fft.fftfreq(N)
-        psd = np.abs(yf) ** 2
-        idx = freqs > 0
-        freqs = freqs[idx]
-        psd = psd[idx]
-        if freqs.size < 2:
-            return np.nan
-        # Avoid zeros
-        keep = (psd > 0) & np.isfinite(psd) & np.isfinite(freqs)
-        freqs = freqs[keep]
-        psd = psd[keep]
-        if freqs.size < 2:
-            return np.nan
-        slope, _ = np.polyfit(np.log10(freqs), np.log10(psd), 1)
-        # heuristic mapping; keep it bounded-ish
-        H = (1.0 - float(slope)) / 2.0
-        return float(H)
-    except Exception as ex:
-        logging.error(f"[Hurst Wavelet] {ex}")
-        return np.nan
-
-
-def _bmt_compute_hurst_rs(self, series) -> float:
-    """Compatibility wrapper for Hurst RS. Uses `hurst.compute_Hc` if available."""
-    try:
-        s = pd.to_numeric(series, errors="coerce").dropna().values.astype(np.float64)
-        if s.size < 16:
-            return float("nan")
-        try:
-            # Prefer the library used elsewhere in the codebase.
-            H, _, _ = compute_Hc(s, kind="change", simplified=True)
-            return float(H)
-        except Exception:
-            # Fallback: RS via nolds if present.
-            if hasattr(nolds, "hurst_rs"):
-                return float(nolds.hurst_rs(s))
-            return float("nan")
-    except Exception as ex:
-        logging.error(f"[Hurst RS] {ex}")
-        return float("nan")
-
-
-# Patch if missing (safe for newer versions).
-try:
-    if "BigMasterTool" in globals():
-        if not hasattr(BigMasterTool, "test_stationarity"):
-            BigMasterTool.test_stationarity = _bmt_test_stationarity
-        if not hasattr(BigMasterTool, "compute_sample_entropy"):
-            BigMasterTool.compute_sample_entropy = _bmt_compute_sample_entropy
-        if not hasattr(BigMasterTool, "detect_seasonality"):
-            BigMasterTool.detect_seasonality = _bmt_detect_seasonality
-        # Hurst: ensure at least 4 variants are always available.
-        if not hasattr(BigMasterTool, "compute_hurst_rs"):
-            BigMasterTool.compute_hurst_rs = _bmt_compute_hurst_rs
-        if not hasattr(BigMasterTool, "compute_hurst_dfa"):
-            BigMasterTool.compute_hurst_dfa = _bmt_compute_hurst_dfa
-        if not hasattr(BigMasterTool, "compute_hurst_aggregated_variance"):
-            BigMasterTool.compute_hurst_aggregated_variance = _bmt_compute_hurst_aggvar
-        # Some codepaths might call it differently.
-        if not hasattr(BigMasterTool, "compute_hurst_aggvar"):
-            BigMasterTool.compute_hurst_aggvar = _bmt_compute_hurst_aggvar
-        if not hasattr(BigMasterTool, "compute_hurst_wavelet"):
-            BigMasterTool.compute_hurst_wavelet = _bmt_compute_hurst_wavelet
-except Exception as _patch_ex:
-    logging.error(f"[HOTFIX] Failed to patch BigMasterTool: {_patch_ex}")
 
