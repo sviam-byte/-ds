@@ -91,12 +91,67 @@ class HTMLReportGenerator:
 
         if include_diagnostics:
             toc.append("<li><a href='#diagnostics'>Первичный анализ</a></li>")
+            diag = {}
+            try:
+                diag = self.tool.get_diagnostics()
+            except Exception:
+                diag = {}
+
             cards = []
-            cards.append("<div class='card'><h3>Диагностика данных</h3><p>Раздел сформирован.</p></div>")
+            if not diag:
+                cards.append("<div class='muted'>Нет диагностических данных</div>")
+            else:
+                for name, d in diag.items():
+                    season = d.get("seasonality") or {}
+                    fftp = d.get("fft_peaks") or {}
+
+                    def _fmt(x) -> str:
+                        if x is None:
+                            return "—"
+                        try:
+                            if isinstance(x, (int, np.integer)):
+                                return str(int(x))
+                            if not np.isfinite(float(x)):
+                                return "NaN"
+                            return f"{float(x):.4g}"
+                        except Exception:
+                            return html.escape(str(x))
+
+                    pk_freqs = fftp.get("freqs", [])
+                    pk_periods = fftp.get("periods", [])
+                    if pk_freqs:
+                        pk_line = ", ".join(
+                            f"f={_fmt(f)} (T={_fmt(t)})" for f, t in zip(pk_freqs, pk_periods)
+                        )
+                    else:
+                        pk_line = "—"
+
+                    cards.append(
+                        "<div class='card'>"
+                        f"<h3>{html.escape(str(name))}</h3>"
+                        "<div class='grid'>"
+                        "<div><b>ADF p</b>: " + _fmt(d.get("adf_p")) + "</div>"
+                        "<div><b>Hurst (R/S)</b>: " + _fmt(d.get("hurst_rs")) + "</div>"
+                        "<div><b>Hurst (DFA)</b>: " + _fmt(d.get("hurst_dfa")) + "</div>"
+                        "<div><b>Hurst (AggVar)</b>: " + _fmt(d.get("hurst_aggvar")) + "</div>"
+                        "<div><b>Hurst (PSD)</b>: " + _fmt(d.get("hurst_wavelet")) + "</div>"
+                        "<div><b>Sample entropy</b>: " + _fmt(d.get("sample_entropy")) + "</div>"
+                        "<div><b>Shannon H</b>: " + _fmt(d.get("shannon_entropy")) + "</div>"
+                        "<div><b>Permutation H</b>: " + _fmt(d.get("permutation_entropy")) + "</div>"
+                        "<div><b>ACF сезонность</b>: период="
+                        + _fmt(season.get("acf_period"))
+                        + ", сила="
+                        + _fmt(season.get("acf_strength"))
+                        + "</div>"
+                        "<div><b>FFT пики</b>: " + html.escape(pk_line) + "</div>"
+                        "</div>"
+                        "</div>"
+                    )
 
             sections.append(
                 "<section class='card' id='diagnostics'>"
                 "<h1>Первичный анализ рядов</h1>"
+                "<div class='muted'>Стационарность • разные Hurst • сезонность • FFT пики • базовые энтропии</div>"
                 + "".join(cards)
                 + "</section>"
             )
@@ -107,7 +162,36 @@ class HTMLReportGenerator:
             toc.append(f"<li><a href='#{anchor}'>{html.escape(info['title'])}</a></li>")
 
             mat = self.tool.results.get(variant)
-            chosen_lag = self.tool.variant_lags.get(variant, 1)
+            chosen_lag = getattr(self.tool, "variant_lags", {}).get(variant, 1)
+
+            meta = getattr(self.tool, "results_meta", {}).get(variant, {}) or {}
+            meta_lines = []
+            if meta.get("partial"):
+                p = meta["partial"]
+                if p.get("pairwise_policy") == "others":
+                    meta_lines.append("Partial: для пары (Xi,Xj) исключено линейное влияние всех остальных переменных.")
+                elif p.get("pairwise_policy") == "custom":
+                    cc = p.get("custom_controls") or []
+                    meta_lines.append("Partial: исключено влияние control=" + html.escape(", ".join(map(str, cc))) + ".")
+                else:
+                    meta_lines.append("Partial: контроль отключён.")
+
+            if meta.get("lag_optimization"):
+                lo = meta["lag_optimization"]
+                meta_lines.append(
+                    f"Lag: выбран автоматически (1..{int(lo.get('max_lag', 1))}), критерий: {html.escape(str(lo.get('criterion', '')))}."
+                )
+
+            win = meta.get("window")
+            if win and win.get("best"):
+                b = win["best"]
+                meta_lines.append(
+                    f"Окна: sizes={html.escape(str(win.get('sizes')))}; policy={html.escape(str(win.get('policy')))}; best window_size={int(b.get('window_size'))}, stride={int(b.get('stride'))}."
+                )
+
+            meta_html = ""
+            if meta_lines:
+                meta_html = "<div class='meta'>" + "<br/>".join(meta_lines) + "</div>"
 
             legend = f"Lag={chosen_lag}"
             buf_heat = plots.plot_heatmap(mat, f"{variant} Теплокарта", labels=cols, legend_text=legend)
@@ -134,11 +218,31 @@ class HTMLReportGenerator:
             if include_matrix_tables:
                 table_html = f"<h4>Матрица значений (Lag={chosen_lag})</h4>" + self._matrix_table(mat, cols)
 
+            win_curve_html = ""
+            try:
+                wmeta = getattr(self.tool, "window_analysis", {}).get(variant)
+                if wmeta and wmeta.get("best") and wmeta["best"].get("curve"):
+                    curve = wmeta["best"]["curve"]
+                    xs = curve.get("x", [])
+                    ys = curve.get("y", [])
+                    if xs and ys:
+                        b64 = self._plot_curve_b64(xs, ys, f"{variant}: quality по окнам", "start")
+                        win_curve_html = (
+                            "<div style='margin-top:10px'>"
+                            "<div class='muted'>Кривая качества по сдвигу окна (в точках)</div>"
+                            f"<img style='max-width:100%;border-radius:10px' src='data:image/png;base64,{b64}'/>"
+                            "</div>"
+                        )
+            except Exception:
+                win_curve_html = ""
+
             sections.append(
                 f"<section class='card' id='{anchor}'>"
                 f"<h2>{html.escape(info['title'])}</h2>"
                 f"<div class='muted'>{html.escape(info.get('meaning', ''))}</div>"
+                f"{meta_html}"
                 f"{self._carousel(car_items, f'c_{k}')}"
+                f"{win_curve_html}"
                 f"{table_html}"
                 f"</section>"
             )
@@ -162,6 +266,8 @@ nav{{width:260px; position:sticky; top:16px; align-self:flex-start; background:#
 table.matrix{{border-collapse:collapse; font-size:11px; width:100%; overflow-x:auto; display:block;}}
 table.matrix th, table.matrix td{{border:1px solid #eee; padding:4px 6px; text-align:right;}}
 table.matrix th{{background:#f9f9f9; text-align:center;}}
+.grid{{display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:8px; margin-top:10px;}}
+.meta{{margin-top:8px; padding:8px 10px; border:1px dashed #ddd; border-radius:10px; font-size:12px; color:#444; background:#fcfcfc;}}
 </style>
 <script>
 function showSlide(cid, idx){{
