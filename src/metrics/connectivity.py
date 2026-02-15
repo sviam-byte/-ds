@@ -27,6 +27,17 @@ def partial_correlation_matrix(df: pd.DataFrame, lag: int = 1, control: Optional
     """Вычисляет матрицу частных корреляций через матрицу точности."""
     cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     n_cols = len(cols)
+    n_rows = len(df)
+
+    # Защита от проклятия размерности: при N <= P инверсия/псевдоинверсия крайне нестабильна.
+    if n_rows <= n_cols + 2:
+        logging.warning(
+            "Слишком мало данных для Partial Correlation: строк %s <= колонок %s. Возвращаю NaN.",
+            n_rows,
+            n_cols,
+        )
+        return np.full((n_cols, n_cols), np.nan)
+
     out = np.eye(n_cols)
     for i in range(n_cols):
         for j in range(i + 1, n_cols):
@@ -232,6 +243,15 @@ def granger_matrix_partial(df: pd.DataFrame, lag: int = DEFAULT_MAX_LAG, control
     n_cols = len(columns)
     out = np.full((n_cols, n_cols), np.nan, dtype=float)
     np.fill_diagonal(out, 0.0)
+
+    # Для VAR-модели нужно достаточно наблюдений относительно числа признаков.
+    if len(df) <= n_cols + 2:
+        logging.warning(
+            "Слишком мало данных для Granger partial: строк %s <= колонок %s. Возвращаю NaN.",
+            len(df),
+            n_cols,
+        )
+        return out
 
     for src_i, src in enumerate(columns):
         for tgt_j, tgt in enumerate(columns):

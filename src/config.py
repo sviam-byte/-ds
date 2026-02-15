@@ -161,12 +161,16 @@ METHOD_INFO = {
 
 @dataclass(slots=True)
 class AnalysisConfig:
-    """Runtime configuration container for analysis orchestration."""
+    """Контейнер конфигурации анализа."""
 
     max_lag: int = DEFAULT_MAX_LAG
     p_value_alpha: float = DEFAULT_PVALUE_ALPHA
     graph_threshold: float = DEFAULT_EDGE_THRESHOLD
     enable_experimental: bool = False
+    # Автоматически делать diff() если ряд нестационарен.
+    auto_difference: bool = False
+    # Поправка на множественные сравнения: 'none' | 'fdr_bh'.
+    pvalue_correction: str = "none"
 
 def is_pvalue_method(variant: str) -> bool:
     """Проверяет, является ли метод p-value методом."""

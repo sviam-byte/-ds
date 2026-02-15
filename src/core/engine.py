@@ -1948,10 +1948,28 @@ class BigMasterTool:
         self.directed_methods = [m for m in method_mapping if get_method_spec(m).directed]
 
     def load_data_excel(self, filepath: str, **kwargs) -> pd.DataFrame:
-        """Загружает данные из файла (CSV/Excel)."""
+        """Загружает данные, чистит их и опционально устраняет нестационарность."""
         self.data = load_or_generate(filepath, **kwargs)
         self.data = self.data.fillna(self.data.mean(numeric_only=True))
-        logging.info("[BigMasterTool] Данные загружены: %s", self.data.shape)
+
+        if self.config.auto_difference:
+            logging.info("Запущена проверка стационарности и авто-дифференцирование...")
+            diff_count = 0
+            for col in self.data.columns:
+                if not pd.api.types.is_numeric_dtype(self.data[col]):
+                    continue
+
+                stat, pval = analysis_stats.test_stationarity(self.data[col])
+                if stat is None:
+                    continue
+                if pval is not None and pval > 0.05:
+                    self.data[col] = self.data[col].diff().fillna(0)
+                    diff_count += 1
+
+            if diff_count > 0:
+                logging.warning("Применено дифференцирование к %s нестационарным рядам.", diff_count)
+
+        logging.info("[BigMasterTool] Данные готовы: %s", self.data.shape)
         return self.data
 
     def normalize_data(self) -> None:
@@ -1966,8 +1984,22 @@ class BigMasterTool:
         self.data_normalized[cols] = scaler.fit_transform(self.data[cols])
         logging.info("Данные нормализованы.")
 
+    def _apply_fdr_correction(self) -> None:
+        """Применяет поправку Бенджамини-Хохберга к p-value методам."""
+        if self.config.pvalue_correction != "fdr_bh":
+            return
+
+        for variant, mat in self.results.items():
+            if mat is None or not is_pvalue_method(variant):
+                continue
+            self.results[variant] = apply_pvalue_correction_matrix(
+                mat,
+                directed=get_method_spec(variant).directed,
+            )
+            logging.info("Применена FDR коррекция к %s", variant)
+
     def run_all_methods(self, **kwargs) -> None:
-        """Запуск всех доступных методов анализа на лаге 1."""
+        """Запуск всех доступных методов анализа."""
         self.normalize_data()
         if self.data_normalized.empty:
             return
@@ -1976,12 +2008,12 @@ class BigMasterTool:
         for variant in method_mapping.keys():
             logging.info("Расчет метода: %s...", variant)
             try:
-                # Вызов функции расчета из реестра метрик
                 self.results[variant] = compute_connectivity_variant(self.data_normalized, variant, lag=1)
             except Exception as e:
                 logging.error("Ошибка в методе %s: %s", variant, e)
                 self.results[variant] = None
 
+        self._apply_fdr_correction()
         logging.info("Все расчеты завершены.")
 
     def run_selected_methods(self, variants: List[str], max_lag: int = 5, **kwargs) -> Dict[str, int]:
