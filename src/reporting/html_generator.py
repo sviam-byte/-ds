@@ -44,6 +44,14 @@ class HTMLReportGenerator:
         buf.seek(0)
         return self._b64_png(buf)
 
+    def _plot_fft_b64(self, series, title: str, fs: float = 1.0) -> str:
+        """Возвращает base64 PNG с FFT-спектром для одного ряда."""
+        return self._b64_png(plots.plot_fft_spectrum(series, title, fs=fs))
+
+    def _plot_cube3d_b64(self, points, title: str) -> str:
+        """Возвращает base64 PNG с 3D-графиком window×lag×position."""
+        return self._b64_png(plots.plot_window_cube_3d(points, title))
+
     def _matrix_table(self, mat: np.ndarray, cols: list) -> str:
         if mat is None or not isinstance(mat, np.ndarray) or mat.size == 0:
             return "<div class='muted'>Нет данных</div>"
@@ -79,6 +87,8 @@ class HTMLReportGenerator:
         """Основной метод построения отчета."""
         include_diagnostics = kwargs.get("include_diagnostics", True)
         include_matrix_tables = kwargs.get("include_matrix_tables", True)
+        include_fft_plots = bool(kwargs.get("include_fft_plots", True))
+        harmonic_top_k = int(kwargs.get("harmonic_top_k", 5))
         graph_threshold = kwargs.get("graph_threshold", 0.2)
         p_alpha = kwargs.get("p_alpha", 0.05)
 
@@ -136,7 +146,7 @@ class HTMLReportGenerator:
 
             harm = {}
             try:
-                harm = self.tool.get_harmonics(top_k=5)
+                harm = self.tool.get_harmonics(top_k=harmonic_top_k)
             except Exception:
                 harm = {}
 
@@ -213,6 +223,14 @@ class HTMLReportGenerator:
                     else:
                         pk_line = "—"
 
+                    fft_html = ""
+                    if include_fft_plots:
+                        try:
+                            fft_b64 = self._plot_fft_b64(self.tool.data[name], f"FFT spectrum: {name}", fs=float(getattr(self.tool, "fs", 1.0)))
+                            fft_html = f"<div><b>FFT график</b>: <img class='inline' src='data:image/png;base64,{fft_b64}'/></div>"
+                        except Exception:
+                            fft_html = "<div><b>FFT график</b>: —</div>"
+
                     cards.append(
                         "<div class='card'>"
                         f"<h3>{html.escape(str(name))}</h3>"
@@ -230,9 +248,10 @@ class HTMLReportGenerator:
                         + ", сила="
                         + _fmt(season.get("acf_strength"))
                         + "</div>"
-                        "<div><b>FFT пики</b>: " + html.escape(pk_line) + "</div>"
-                        "</div>"
-                        "</div>"
+                        + "<div><b>FFT пики</b>: " + html.escape(pk_line) + "</div>"
+                        + fft_html
+                        + "</div>"
+                        + "</div>"
                     )
 
             sections.append(
@@ -279,6 +298,31 @@ class HTMLReportGenerator:
             meta_html = ""
             if meta_lines:
                 meta_html = "<div class='meta'>" + "<br/>".join(meta_lines) + "</div>"
+
+            cube_html = ""
+            cube = meta.get("window_cube") or {}
+            if isinstance(cube, dict) and (cube.get("points") or []):
+                try:
+                    b64 = self._plot_cube3d_b64(cube.get("points") or [], f"{variant}: window×lag×position")
+                    cube_html = "<div class='card'><h3>3D: window×lag×position</h3><img src='data:image/png;base64," + b64 + "'/></div>"
+                except Exception:
+                    cube_html = ""
+
+            pair_table_html = ""
+            try:
+                dfp = (getattr(self.tool, "pairwise_summaries", {}) or {}).get(variant)
+                if dfp is not None and not getattr(dfp, "empty", True):
+                    if is_pvalue_method(variant):
+                        view = dfp.sort_values("value", ascending=True).head(20)
+                    else:
+                        view = dfp.assign(absval=dfp["value"].abs()).sort_values("absval", ascending=False).head(20).drop(columns=["absval"])
+                    rows = ["<table class='pairs'><thead><tr><th>src</th><th>tgt</th><th>value</th><th>flag</th></tr></thead><tbody>"]
+                    for _, r in view.iterrows():
+                        rows.append(f"<tr><td>{html.escape(str(r['src']))}</td><td>{html.escape(str(r['tgt']))}</td><td>{float(r['value']):.4g}</td><td>{html.escape(str(r.get('flag','')))}</td></tr>")
+                    rows.append("</tbody></table>")
+                    pair_table_html = "<div class='card'><h3>Сводка по парам (топ)</h3>" + "".join(rows) + "</div>"
+            except Exception:
+                pair_table_html = ""
 
             legend = f"Lag={chosen_lag}"
             buf_heat = plots.plot_heatmap(mat, f"{variant} Теплокарта", labels=cols, legend_text=legend)
@@ -327,7 +371,7 @@ class HTMLReportGenerator:
                 f"<section class='card' id='{anchor}'>"
                 f"<h2>{html.escape(info['title'])}</h2>"
                 f"<div class='muted'>{html.escape(info.get('meaning', ''))}</div>"
-                f"{meta_html}"
+                f"{meta_html}{cube_html}{pair_table_html}"
                 f"{self._carousel(car_items, f'c_{k}')}"
                 f"{win_curve_html}"
                 f"{table_html}"
@@ -350,6 +394,10 @@ nav{{width:260px; position:sticky; top:16px; align-self:flex-start; background:#
 .tabs{{display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px;}}
 .tab{{border:1px solid #ccc; background:#f6f6f6; border-radius:15px; padding:6px 12px; cursor:pointer; font-size:12px;}}
 .slide img{{max-width:100%; border-radius:10px;}}
+img.inline{{max-width:100%;height:auto;border-radius:10px;}}
+table.pairs{{width:100%;border-collapse:collapse;font-size:12px;}}
+table.pairs th, table.pairs td{{border:1px solid #ddd;padding:6px;}}
+table.pairs th{{background:#f5f5f5;text-align:left;}}
 table.matrix{{border-collapse:collapse; font-size:11px; width:100%; overflow-x:auto; display:block;}}
 table.matrix th, table.matrix td{{border:1px solid #eee; padding:4px 6px; text-align:right;}}
 table.matrix th{{background:#f9f9f9; text-align:center;}}

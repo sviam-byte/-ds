@@ -134,6 +134,8 @@ class RunSpec:
     preprocess: bool
     preprocess_options: Dict[str, Any]
     window_cube_level: str
+    window_cube_eval_limit: int
+    include_fft_plots: bool
     harmonic_top_k: int
 
     def explain(self) -> str:
@@ -151,7 +153,8 @@ class RunSpec:
         if self.custom_controls:
             lines.append(f"custom_controls={self.custom_controls}")
         lines.append(f"preprocess={'on' if self.preprocess else 'off'} options={self.preprocess_options or {}}")
-        lines.append(f"window_cube_level={self.window_cube_level}")
+        lines.append(f"window_cube_level={self.window_cube_level} (eval_limit={self.window_cube_eval_limit})")
+        lines.append(f"include_fft_plots={self.include_fft_plots}")
         lines.append(f"harmonic_top_k={self.harmonic_top_k}")
         return "\n".join(lines)
 
@@ -182,10 +185,12 @@ def build_run_spec(user_cfg: Dict[str, Any], *, default_max_lag: int = 12) -> Ru
     if not isinstance(preprocess_options, dict):
         preprocess_options = {}
 
-    window_cube_level = str(user_cfg.get("window_cube_level", "off")).strip().lower()
+    window_cube_level = str(user_cfg.get("window_cube", user_cfg.get("window_cube_level", "off"))).strip().lower()
     if window_cube_level not in {"off", "basic", "full"}:
         window_cube_level = "off"
+    window_cube_eval_limit = int(user_cfg.get("window_cube_eval_limit", 120 if window_cube_level == "full" else 60))
 
+    include_fft_plots = bool(user_cfg.get("include_fft_plots", True))
     harmonic_top_k = int(user_cfg.get("harmonic_top_k", 5))
     harmonic_top_k = max(1, min(20, harmonic_top_k))
 
@@ -203,5 +208,7 @@ def build_run_spec(user_cfg: Dict[str, Any], *, default_max_lag: int = 12) -> Ru
         preprocess=preprocess,
         preprocess_options=preprocess_options,
         window_cube_level=window_cube_level,
+        window_cube_eval_limit=window_cube_eval_limit,
+        include_fft_plots=include_fft_plots,
         harmonic_top_k=harmonic_top_k,
     )

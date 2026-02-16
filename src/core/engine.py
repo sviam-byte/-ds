@@ -2171,7 +2171,7 @@ class BigMasterTool:
             # Быстрый 3D-поиск: window_size × lag × window_start.
             max_lag_cube = int(kwargs.get("max_lag", self.config.max_lag) or self.config.max_lag)
             lags = list(range(1, max(1, max_lag_cube) + 1))
-            eval_limit = int(kwargs.get("window_cube_eval_limit", 60))
+            eval_limit = int(kwargs.get("window_cube_eval_limit", 120 if window_cube_level == "full" else 60))
             grid = []
             best_cube = None
             best_cube_q = float("-inf")
@@ -2198,10 +2198,23 @@ class BigMasterTool:
                     }
 
             if best_cube is not None:
+                # Для отчёта сохраняем и 3D-точки (window, lag, start, metric), и агрегированный grid.
+                points = []
+                try:
+                    for g in grid:
+                        st = g.get("best_start")
+                        mt = g.get("best_metric")
+                        if st is None or mt is None:
+                            continue
+                        points.append({"window_size": int(g["window_size"]), "lag": int(g["lag"]), "start": int(st), "metric": float(mt)})
+                except Exception:
+                    points = []
+
                 meta["window_cube"] = {
                     "level": window_cube_level,
                     "eval_limit": int(eval_limit),
                     "grid": grid,
+                    "points": points,
                     "best": best_cube,
                 }
                 chosen_lag = int(best_cube["lag"])
@@ -2280,14 +2293,15 @@ class BigMasterTool:
         rep["autodiff"] = dict(self.autodiff_report or {"enabled": False, "differenced": []})
         return rep
 
-    def get_harmonics(self, top_k: int = 5, fs: float = 1.0) -> dict:
+    def get_harmonics(self, top_k: int = 5, fs: float | None = None) -> dict:
         """Возвращает FFT-пики (гармоники) по каждому ряду."""
         out = {}
         if self.data.empty:
             return out
+        fs0 = float(fs) if fs is not None else float(getattr(self, "fs", 1.0))
         for col in self.data.columns:
             s = self.data[col]
-            out[col] = analysis_stats.fft_peaks(s, fs=fs, top_k=int(max(1, top_k)))
+            out[col] = analysis_stats.fft_peaks(s, fs=fs0, top_k=int(max(1, top_k)))
         return out
 
     def get_diagnostics(self) -> dict:
