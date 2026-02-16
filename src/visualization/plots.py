@@ -129,3 +129,113 @@ def plot_connectome(
     plt.close(fig)
     buf.seek(0)
     return buf
+
+
+def plot_timeseries_panel(
+    df,
+    title: str,
+    *,
+    max_points: int = 2000,
+    y_domain: tuple[float, float] | None = None,
+) -> BytesIO:
+    """Рисует несколько рядов в отдельных осях, но с общим диапазоном Y."""
+    import pandas as pd
+
+    if df is None or len(df) == 0:
+        buf = BytesIO()
+        fig, ax = plt.subplots(figsize=(6, 2))
+        ax.text(0.5, 0.5, "No data", ha="center", va="center")
+        ax.axis("off")
+        fig.savefig(buf, format="png", dpi=150)
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+
+    data = df.copy() if hasattr(df, "copy") else pd.DataFrame(df)
+    cols = list(data.columns)
+    n = len(data)
+    if n > max_points:
+        idx = np.linspace(0, n - 1, max_points).round().astype(int)
+        data = data.iloc[idx]
+
+    if y_domain is None:
+        vals = data.to_numpy(dtype=float)
+        vmin = float(np.nanmin(vals)) if np.isfinite(vals).any() else -1.0
+        vmax = float(np.nanmax(vals)) if np.isfinite(vals).any() else 1.0
+        if vmin == vmax:
+            vmin -= 1.0
+            vmax += 1.0
+        y_domain = (vmin, vmax)
+
+    rows = len(cols)
+    fig_h = max(2.0, 1.2 * rows)
+    fig, axes = plt.subplots(rows, 1, figsize=(8, fig_h), sharex=True)
+    if rows == 1:
+        axes = [axes]
+
+    for ax, c in zip(axes, cols):
+        y = np.asarray(data[c], dtype=float)
+        ax.plot(y)
+        ax.set_ylabel(str(c), fontsize=8)
+        ax.set_ylim(y_domain[0], y_domain[1])
+        ax.grid(True, alpha=0.2)
+
+    axes[0].set_title(title, fontsize=10)
+    axes[-1].set_xlabel("t (index)")
+    plt.tight_layout()
+    buf = BytesIO()
+    plt.savefig(buf, format="png", dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def plot_fft_spectrum(
+    series,
+    title: str,
+    *,
+    fs: float = 1.0,
+    max_points: int = 4096,
+) -> BytesIO:
+    """Быстрый спектр (FFT амплитуды по частоте) для ряда."""
+    import pandas as pd
+
+    s = pd.to_numeric(series, errors="coerce")
+    arr = np.asarray(s.to_numpy(), dtype=float)
+    arr = arr[np.isfinite(arr)]
+    n = int(arr.size)
+    if n < 8:
+        buf = BytesIO()
+        fig, ax = plt.subplots(figsize=(6, 2))
+        ax.text(0.5, 0.5, "Too short", ha="center", va="center")
+        ax.axis("off")
+        fig.savefig(buf, format="png", dpi=150)
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+
+    if n > max_points:
+        arr = arr[-max_points:]
+        n = int(arr.size)
+
+    fs = float(fs) if fs and np.isfinite(fs) and fs > 0 else 1.0
+    dt = 1.0 / fs
+    freqs = np.fft.fftfreq(n, d=dt)
+    yf = np.fft.fft(arr - float(np.mean(arr)))
+    amp = np.abs(yf)
+    mask = freqs > 0
+    freqs = freqs[mask]
+    amp = amp[mask]
+
+    buf = BytesIO()
+    fig, ax = plt.subplots(figsize=(8, 3))
+    ax.plot(freqs, amp)
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel("frequency")
+    ax.set_ylabel("|FFT|")
+    ax.grid(True, alpha=0.2)
+    plt.tight_layout()
+    fig.savefig(buf, format="png", dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf

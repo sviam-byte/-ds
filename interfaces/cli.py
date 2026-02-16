@@ -51,7 +51,6 @@ def _process_single_file(filepath: str, args: argparse.Namespace, out_dir: str) 
     )
 
     tool = BigMasterTool(config=cfg)
-    tool.load_data_excel(filepath)
 
     # Важно для совместимости:
     # - если пользовательский конфиг НЕ задан, оставляем старое поведение run_all_methods().
@@ -76,6 +75,23 @@ def _process_single_file(filepath: str, args: argparse.Namespace, out_dir: str) 
         print(spec.explain())
         print()
 
+        # Загружаем данные с опциями предобработки из пользовательской спецификации.
+        load_kwargs = {"preprocess": bool(spec.preprocess)}
+        opts = dict(spec.preprocess_options or {})
+        for key in [
+            "log_transform",
+            "remove_outliers",
+            "normalize",
+            "fill_missing",
+            "check_stationarity",
+            "header",
+            "time_col",
+            "transpose",
+        ]:
+            if key in opts:
+                load_kwargs[key] = opts[key]
+        tool.load_data_excel(filepath, **load_kwargs)
+
         tool.run_selected_methods(
             variants,
             max_lag=spec.max_lag,
@@ -88,6 +104,7 @@ def _process_single_file(filepath: str, args: argparse.Namespace, out_dir: str) 
             custom_controls=spec.custom_controls,
         )
     else:
+        tool.load_data_excel(filepath)
         tool.run_all_methods()
 
     name = Path(filepath).stem

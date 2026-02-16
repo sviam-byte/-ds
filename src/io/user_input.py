@@ -130,6 +130,12 @@ class RunSpec:
     pairwise_policy: str
     custom_controls: Optional[List[str]]
 
+    # UI/report options
+    preprocess: bool
+    preprocess_options: Dict[str, Any]
+    window_cube_level: str
+    harmonic_top_k: int
+
     def explain(self) -> str:
         """Возвращает человеко-понятное описание параметров запуска."""
         lines: List[str] = []
@@ -144,6 +150,9 @@ class RunSpec:
         lines.append(f"partial_mode={self.partial_mode}, pairwise_policy={self.pairwise_policy}")
         if self.custom_controls:
             lines.append(f"custom_controls={self.custom_controls}")
+        lines.append(f"preprocess={'on' if self.preprocess else 'off'} options={self.preprocess_options or {}}")
+        lines.append(f"window_cube_level={self.window_cube_level}")
+        lines.append(f"harmonic_top_k={self.harmonic_top_k}")
         return "\n".join(lines)
 
 
@@ -168,6 +177,18 @@ def build_run_spec(user_cfg: Dict[str, Any], *, default_max_lag: int = 12) -> Ru
     pairwise_policy = str(user_cfg.get("pairwise_policy", "others")).strip().lower()
     custom_controls = _parse_list(user_cfg.get("custom_controls")) or None
 
+    preprocess = bool(user_cfg.get("preprocess", True))
+    preprocess_options = user_cfg.get("preprocess_options") or {}
+    if not isinstance(preprocess_options, dict):
+        preprocess_options = {}
+
+    window_cube_level = str(user_cfg.get("window_cube_level", "off")).strip().lower()
+    if window_cube_level not in {"off", "basic", "full"}:
+        window_cube_level = "off"
+
+    harmonic_top_k = int(user_cfg.get("harmonic_top_k", 5))
+    harmonic_top_k = max(1, min(20, harmonic_top_k))
+
     return RunSpec(
         preset=preset,
         variants=variants_list,
@@ -179,4 +200,8 @@ def build_run_spec(user_cfg: Dict[str, Any], *, default_max_lag: int = 12) -> Ru
         partial_mode=partial_mode,
         pairwise_policy=pairwise_policy,
         custom_controls=custom_controls,
+        preprocess=preprocess,
+        preprocess_options=preprocess_options,
+        window_cube_level=window_cube_level,
+        harmonic_top_k=harmonic_top_k,
     )

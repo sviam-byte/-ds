@@ -7,12 +7,35 @@
 
 import logging
 import pandas as pd
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 from ..config import DEFAULT_OUTLIER_Z
 from .preprocessing import additional_preprocessing
 from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.stattools import adfuller
 import numpy as np
+
+
+@dataclass
+class PreprocessReport:
+    """Структурированный отчёт о предобработке временных рядов.
+
+    Используется в UI/HTML-отчёте, чтобы явно показать применённые шаги.
+    """
+
+    enabled: bool = True
+    steps_global: List[str] = field(default_factory=list)
+    steps_by_column: Dict[str, List[str]] = field(default_factory=dict)
+    dropped_columns: List[str] = field(default_factory=list)
+    notes: Dict[str, Any] = field(default_factory=dict)
+
+    def add(self, msg: str, col: Optional[str] = None) -> None:
+        """Добавляет шаг в глобальный список или к конкретной колонке."""
+        if col is None:
+            self.steps_global.append(msg)
+        else:
+            self.steps_by_column.setdefault(col, []).append(msg)
 
 
 def _is_mostly_numeric_row(row) -> bool:
@@ -132,17 +155,30 @@ def preprocess_timeseries(
     normalize: bool = True,
     fill_missing: bool = True,
     check_stationarity: bool = False,
-) -> pd.DataFrame:
+    return_report: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, PreprocessReport]:
     """Предобработка матрицы (можно полностью отключить enabled=False)."""
     out = df.copy()
+    report = PreprocessReport(enabled=bool(enabled))
     if not enabled:
-        logging.info("[Preprocess] disabled: using raw numeric matrix as-is.")
-        return out
+        report.add("[Preprocess] disabled: using raw numeric matrix as-is.")
+        return (out, report) if return_report else out
 
+    report.add("[Preprocess] enabled")
+
+    before_cols = list(out.columns)
     out = additional_preprocessing(out)
+    after_cols = list(out.columns)
+    dropped = [c for c in before_cols if c not in after_cols]
+    if dropped:
+        report.dropped_columns.extend(dropped)
+        report.add(f"[Preprocess] dropped near-constant columns: {dropped}")
+
     out = out.fillna(out.mean(numeric_only=True))
+    report.add("[Preprocess] fillna: column means")
 
     if log_transform:
+        report.add("[Preprocess] log-transform: applied to positive values")
         out = out.applymap(lambda x: np.log(x) if x is not None and not np.isnan(x) and x > 0 else x)
 
     if remove_outliers:
@@ -154,18 +190,22 @@ def preprocess_timeseries(
                     upper, lower = mean + DEFAULT_OUTLIER_Z * std, mean - DEFAULT_OUTLIER_Z * std
                     outliers = (series < lower) | (series > upper)
                     if outliers.any():
+                        report.add(f"[Preprocess] outliers->NaN: z>{DEFAULT_OUTLIER_Z} (n={int(outliers.sum())})", col=col)
                         out.loc[outliers, col] = np.nan
 
     if fill_missing:
+        report.add("[Preprocess] fill_missing: linear interpolate + bfill/ffill")
         out = out.interpolate(method="linear", limit_direction="both", axis=0).bfill().ffill().fillna(0)
 
     if normalize:
+        report.add("[Preprocess] normalize: z-score")
         cols_to_norm = [c for c in out.columns if pd.api.types.is_numeric_dtype(out[c])]
         if cols_to_norm:
             scaler = StandardScaler()
             out[cols_to_norm] = scaler.fit_transform(out[cols_to_norm])
 
     if check_stationarity:
+        report.add("[Preprocess] stationarity check: ADF")
         for col in out.columns:
             if pd.api.types.is_numeric_dtype(out[col]):
                 series = out[col].dropna()
@@ -174,7 +214,7 @@ def preprocess_timeseries(
                     logging.info(
                         f"Ряд '{col}' {'стационарен' if pvalue <= 0.05 else 'вероятно нестационарен'} (p-value ADF={pvalue:.3f})."
                     )
-    return out
+    return (out, report) if return_report else out
 
 
 def load_or_generate(
@@ -189,7 +229,8 @@ def load_or_generate(
     normalize: bool = True,
     fill_missing: bool = True,
     check_stationarity: bool = False,
-) -> pd.DataFrame:
+    return_report: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, PreprocessReport]:
     """
     Главная функция загрузки и предобработки данных из файла.
     
@@ -211,7 +252,7 @@ def load_or_generate(
     try:
         raw = read_input_table(filepath, header=header)
         df = tidy_timeseries_table(raw, time_col=time_col, transpose=transpose)
-        df = preprocess_timeseries(
+        df_out = preprocess_timeseries(
             df,
             enabled=preprocess,
             log_transform=log_transform,
@@ -219,11 +260,16 @@ def load_or_generate(
             normalize=normalize,
             fill_missing=fill_missing,
             check_stationarity=check_stationarity,
+            return_report=bool(return_report),
         )
+        if return_report:
+            df, report = df_out  # type: ignore[misc]
+        else:
+            df, report = df_out, None
         logging.info(
             f"[Load] OK shape={df.shape} header={header} time_col={time_col} transpose={transpose} preprocess={preprocess}"
         )
-        return df
+        return (df, report) if return_report else df
     except Exception as e:
         logging.error(f"[Load] Ошибка загрузки: {e}")
         raise

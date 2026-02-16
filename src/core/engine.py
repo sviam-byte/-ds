@@ -1922,6 +1922,13 @@ class BigMasterTool:
 
     def __init__(self, data: pd.DataFrame = None, enable_experimental: bool = False, config: Optional[AnalysisConfig] = None) -> None:
         # Инициализация данных
+        # Снимки для отчёта: raw -> preprocessed -> after auto-diff.
+        self.data_raw = pd.DataFrame()
+        self.data_preprocessed = pd.DataFrame()
+        self.data_after_autodiff = pd.DataFrame()
+        self.preprocessing_report = None  # type: ignore
+        self.autodiff_report = {"enabled": False, "differenced": []}
+        self.pairwise_summaries = {}
         if data is not None:
             # Чистка константных колонок
             data = data.loc[:, (data != data.iloc[0]).any()]
@@ -1951,10 +1958,31 @@ class BigMasterTool:
 
     def load_data_excel(self, filepath: str, **kwargs) -> pd.DataFrame:
         """Загружает данные, чистит их и опционально устраняет нестационарность."""
-        self.data = load_or_generate(filepath, **kwargs)
+        # 1) Сырой numeric-слепок без предобработки для честного before/after в отчёте.
+        try:
+            self.data_raw = load_or_generate(
+                filepath,
+                preprocess=False,
+                normalize=False,
+                remove_outliers=False,
+                fill_missing=False,
+                check_stationarity=False,
+            )
+        except Exception:
+            self.data_raw = pd.DataFrame()
+
+        # 2) Основной путь загрузки (с учётом выбранных опций) + структурированный отчёт.
+        df_out = load_or_generate(filepath, return_report=True, **kwargs)
+        if isinstance(df_out, tuple):
+            self.data, self.preprocessing_report = df_out
+        else:
+            self.data, self.preprocessing_report = df_out, None
+        self.data_preprocessed = self.data.copy()
+
         self.data = self.data.fillna(self.data.mean(numeric_only=True))
 
         if self.config.auto_difference:
+            self.autodiff_report = {"enabled": True, "differenced": []}
             logging.info("Запущена проверка стационарности и авто-дифференцирование...")
             diff_count = 0
             for col in self.data.columns:
@@ -1967,10 +1995,12 @@ class BigMasterTool:
                 if pval is not None and pval > 0.05:
                     self.data[col] = self.data[col].diff().fillna(0)
                     diff_count += 1
+                    self.autodiff_report.setdefault("differenced", []).append(col)
 
             if diff_count > 0:
                 logging.warning("Применено дифференцирование к %s нестационарным рядам.", diff_count)
 
+        self.data_after_autodiff = self.data.copy()
         logging.info("[BigMasterTool] Данные готовы: %s", self.data.shape)
         return self.data
 
@@ -2136,6 +2166,46 @@ class BigMasterTool:
         window_sizes = [int(w) for w in window_sizes if int(w) >= 2]
         stride_override = kwargs.get("window_stride") or self.config.window_stride
 
+        window_cube_level = str(kwargs.get("window_cube_level", "off") or "off").lower()
+        if window_cube_level != "off":
+            # Быстрый 3D-поиск: window_size × lag × window_start.
+            max_lag_cube = int(kwargs.get("max_lag", self.config.max_lag) or self.config.max_lag)
+            lags = list(range(1, max(1, max_lag_cube) + 1))
+            eval_limit = int(kwargs.get("window_cube_eval_limit", 60))
+            grid = []
+            best_cube = None
+            best_cube_q = float("-inf")
+
+            combos = [(w, lag) for w in window_sizes for lag in lags]
+            if len(combos) > eval_limit:
+                idx = np.linspace(0, len(combos) - 1, eval_limit).round().astype(int)
+                combos = [combos[i] for i in idx]
+
+            for w, lag in combos:
+                stride = int(stride_override) if stride_override is not None else int(max(1, int(w) // 5))
+                w_info = analyze_sliding_windows_with_metric(df, variant, window_size=int(w), stride=int(stride), lag=int(lag))
+                bw = w_info.get("best_window") if w_info else None
+                q = float(bw.get("metric", float("nan"))) if bw else float("nan")
+                grid.append({"window_size": int(w), "lag": int(lag), "best_metric": q, "best_start": (bw.get("start") if bw else None)})
+                if np.isfinite(q) and q > best_cube_q and bw and bw.get("matrix") is not None:
+                    best_cube_q = q
+                    best_cube = {
+                        "window_size": int(w),
+                        "lag": int(lag),
+                        "stride": int(stride),
+                        "best_window": bw,
+                        "curve": (w_info.get("curve") if window_cube_level == "full" else None),
+                    }
+
+            if best_cube is not None:
+                meta["window_cube"] = {
+                    "level": window_cube_level,
+                    "eval_limit": int(eval_limit),
+                    "grid": grid,
+                    "best": best_cube,
+                }
+                chosen_lag = int(best_cube["lag"])
+
         mats = []
         best = None
         best_q = float("-inf")
@@ -2189,6 +2259,37 @@ class BigMasterTool:
         """Проверяет стационарность ряда через ADF-тест."""
         return analysis_stats.test_stationarity(series)
 
+    def get_preprocessing_summary(self) -> dict:
+        """Возвращает отчёт о предобработке и auto-diff в формате для UI/HTML."""
+        rep = {}
+        try:
+            if self.preprocessing_report is not None:
+                pr = self.preprocessing_report
+                rep["preprocess"] = {
+                    "enabled": bool(getattr(pr, "enabled", True)),
+                    "steps_global": list(getattr(pr, "steps_global", [])),
+                    "steps_by_column": dict(getattr(pr, "steps_by_column", {})),
+                    "dropped_columns": list(getattr(pr, "dropped_columns", [])),
+                    "notes": dict(getattr(pr, "notes", {})),
+                }
+            else:
+                rep["preprocess"] = {"enabled": None, "steps_global": [], "steps_by_column": {}, "dropped_columns": [], "notes": {}}
+        except Exception:
+            rep["preprocess"] = {"enabled": None, "steps_global": [], "steps_by_column": {}, "dropped_columns": [], "notes": {}}
+
+        rep["autodiff"] = dict(self.autodiff_report or {"enabled": False, "differenced": []})
+        return rep
+
+    def get_harmonics(self, top_k: int = 5, fs: float = 1.0) -> dict:
+        """Возвращает FFT-пики (гармоники) по каждому ряду."""
+        out = {}
+        if self.data.empty:
+            return out
+        for col in self.data.columns:
+            s = self.data[col]
+            out[col] = analysis_stats.fft_peaks(s, fs=fs, top_k=int(max(1, top_k)))
+        return out
+
     def get_diagnostics(self) -> dict:
         """Возвращает базовые диагностические метрики по всем столбцам."""
         diagnostics = {}
@@ -2213,6 +2314,33 @@ class BigMasterTool:
                 "fft_peaks": fft_pk,
             }
         return diagnostics
+
+    def build_pairwise_summaries(self, *, p_alpha: float = 0.05) -> None:
+        """Строит компактные pairwise-таблицы по каждой матрице результатов."""
+        import pandas as pd
+
+        self.pairwise_summaries = {}
+        cols = list(self.data.columns) if self.data is not None and not self.data.empty else []
+        for variant, mat in (self.results or {}).items():
+            if mat is None or not isinstance(mat, np.ndarray) or mat.size == 0:
+                continue
+            is_pval = is_pvalue_method(variant)
+            thr = float(p_alpha) if is_pval else float(getattr(self.config, "graph_threshold", 0.2))
+            rows = []
+            for i, a in enumerate(cols):
+                for j, b in enumerate(cols):
+                    if i == j:
+                        continue
+                    v = mat[i, j]
+                    if v is None or not np.isfinite(float(v)):
+                        continue
+                    if is_pval:
+                        flag = "significant" if float(v) < thr else ""
+                    else:
+                        flag = "strong" if abs(float(v)) > thr else ""
+                    rows.append({"src": a, "tgt": b, "value": float(v), "flag": flag})
+            if rows:
+                self.pairwise_summaries[variant] = pd.DataFrame(rows)
 
 
 if __name__ == "__main__":

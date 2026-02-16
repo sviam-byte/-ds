@@ -32,8 +32,14 @@ def main() -> None:
             threshold = st.number_input("Порог графа (Threshold)", 0.0, 1.0, 0.2, 0.05)
         with col3:
             normalize = st.checkbox("Нормализация (Z-score)", value=True)
+            preprocess = st.checkbox("Предобработка (fill/outliers/log)", value=True)
+            fill_missing = st.checkbox("Заполнять пропуски (interp)", value=True)
+            remove_outliers = st.checkbox("Убирать выбросы (Z)", value=True)
+            log_transform = st.checkbox("Лог-преобразование (только >0)", value=False)
 
         alpha = st.number_input("P-value alpha (для Granger)", 0.0001, 0.5, 0.05, format="%.4f")
+        window_cube_level = st.selectbox("Анализ окно×лаг×положение", ["off", "basic", "full"], index=1)
+        window_sizes_text = st.text_input("Window sizes (comma)", value="256,512")
 
     all_methods = STABLE_METHODS + EXPERIMENTAL_METHODS
     selected_methods = st.multiselect("Выберите методы", all_methods, default=STABLE_METHODS[:2])
@@ -52,9 +58,26 @@ def main() -> None:
 
             with st.spinner("Загрузка и обработка..."):
                 try:
-                    tool.load_data_excel(input_path, normalize=normalize, fill_missing=True)
+                    tool.load_data_excel(
+                        input_path,
+                        preprocess=preprocess,
+                        normalize=normalize,
+                        fill_missing=fill_missing,
+                        remove_outliers=remove_outliers,
+                        log_transform=log_transform,
+                    )
 
-                    tool.run_selected_methods(selected_methods, max_lag=lag)
+                    try:
+                        window_sizes = [int(x.strip()) for x in window_sizes_text.split(',') if x.strip()]
+                    except Exception:
+                        window_sizes = None
+                    tool.run_selected_methods(
+                        selected_methods,
+                        max_lag=lag,
+                        window_sizes=window_sizes,
+                        window_policy="best",
+                        window_cube_level=window_cube_level,
+                    )
 
                     excel_path = os.path.join(tmp_dir, "report.xlsx")
                     html_path = os.path.join(tmp_dir, "report.html")
