@@ -247,7 +247,9 @@ def load_or_generate(
         check_stationarity: Проверить стационарность
         
     Returns:
-        pd.DataFrame: Предобработанная матрица временных рядов
+        Если ``return_report=False``: ``pd.DataFrame`` с матрицей временных рядов.
+        Если ``return_report=True``: кортеж ``(pd.DataFrame, PreprocessReport)``
+        для последующей визуализации шагов предобработки в UI/HTML-отчёте.
     """
     try:
         raw = read_input_table(filepath, header=header)
