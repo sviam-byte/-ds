@@ -83,11 +83,98 @@ class HTMLReportGenerator:
         p_alpha = kwargs.get("p_alpha", 0.05)
 
         df = self.tool.data_normalized if not self.tool.data_normalized.empty else self.tool.data
+        # Предрасчёт компактных pairwise-таблиц для UI/секции отчёта.
+        try:
+            self.tool.build_pairwise_summaries(p_alpha=float(p_alpha))
+        except Exception:
+            pass
         cols = list(df.columns)
         variants = list(self.tool.results.keys())
 
         sections = []
         toc = []
+
+        # Главный экран: raw/proc в едином масштабе + отчёт предобработки + гармоники.
+        try:
+            raw_df = getattr(self.tool, "data_raw", None)
+            proc_df = getattr(self.tool, "data_preprocessed", None)
+            if raw_df is None or getattr(raw_df, "empty", True):
+                raw_df = self.tool.data
+            if proc_df is None or getattr(proc_df, "empty", True):
+                proc_df = self.tool.data
+
+            y_domain = None
+            try:
+                vals = raw_df.to_numpy(dtype=float)
+                if np.isfinite(vals).any():
+                    y_domain = (float(np.nanmin(vals)), float(np.nanmax(vals)))
+            except Exception:
+                y_domain = None
+
+            b64_raw = self._b64_png(plots.plot_timeseries_panel(raw_df, "Ряды: RAW (общий масштаб Y)", y_domain=y_domain))
+            b64_proc = self._b64_png(plots.plot_timeseries_panel(proc_df, "Ряды: после предобработки/auto-diff (общий масштаб Y)", y_domain=y_domain))
+
+            prep = {}
+            try:
+                prep = self.tool.get_preprocessing_summary()
+            except Exception:
+                prep = {}
+
+            prep_lines = []
+            p0 = prep.get("preprocess") or {}
+            if p0.get("enabled") is not None:
+                prep_lines.append(f"<b>Предобработка</b>: {'ON' if p0.get('enabled') else 'OFF'}")
+            if p0.get("dropped_columns"):
+                prep_lines.append("<b>Удалено</b>: " + html.escape(", ".join(map(str, p0.get("dropped_columns", [])))))
+            if p0.get("steps_global"):
+                prep_lines.append("<b>Шаги</b>: " + html.escape(" | ".join(map(str, p0.get("steps_global", [])[:12]))))
+            ad = prep.get("autodiff") or {}
+            if ad.get("enabled"):
+                prep_lines.append("<b>Auto-diff</b>: дифференцированы " + html.escape(", ".join(map(str, ad.get("differenced", []))) or "—"))
+
+            prep_html = "<div class='meta'>" + "<br/>".join(prep_lines) + "</div>" if prep_lines else ""
+
+            harm = {}
+            try:
+                harm = self.tool.get_harmonics(top_k=5)
+            except Exception:
+                harm = {}
+
+            harm_cards = []
+            for name, hk in (harm or {}).items():
+                freqs = hk.get("freqs", [])
+                amps = hk.get("amps", [])
+                periods = hk.get("periods", [])
+                lines = []
+                for f, a, t in zip(freqs, amps, periods):
+                    try:
+                        lines.append(f"f={float(f):.5g}, A={float(a):.5g}, T={float(t):.5g}")
+                    except Exception:
+                        continue
+                harm_cards.append(
+                    "<div class='card'>"
+                    f"<h3>{html.escape(str(name))}</h3>"
+                    "<div class='muted'>Топ гармоники (FFT пики):</div>"
+                    f"<div class='mono'>{html.escape(' | '.join(lines) if lines else '—')}</div>"
+                    "</div>"
+                )
+
+            toc.insert(0, "<li><a href='#main'>Главный экран</a></li>")
+            sections.insert(
+                0,
+                "<section class='card' id='main'>"
+                "<h1>Главный экран</h1>"
+                "<div class='muted'>RAW/после предобработки в одном масштабе Y • применённая предобработка • гармоники</div>"
+                f"{prep_html}"
+                "<div class='grid2'>"
+                f"<div><img src='data:image/png;base64,{b64_raw}'/></div>"
+                f"<div><img src='data:image/png;base64,{b64_proc}'/></div>"
+                "</div>"
+                + "".join(harm_cards[:8])
+                + "</section>"
+            )
+        except Exception:
+            pass
 
         if include_diagnostics:
             toc.append("<li><a href='#diagnostics'>Первичный анализ</a></li>")
@@ -268,6 +355,8 @@ table.matrix th, table.matrix td{{border:1px solid #eee; padding:4px 6px; text-a
 table.matrix th{{background:#f9f9f9; text-align:center;}}
 .grid{{display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:8px; margin-top:10px;}}
 .meta{{margin-top:8px; padding:8px 10px; border:1px dashed #ddd; border-radius:10px; font-size:12px; color:#444; background:#fcfcfc;}}
+.grid2{{display:grid; grid-template-columns:1fr 1fr; gap:12px;}}
+.mono{{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px;}}
 </style>
 <script>
 function showSlide(cid, idx){{
