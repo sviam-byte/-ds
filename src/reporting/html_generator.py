@@ -85,9 +85,10 @@ class HTMLReportGenerator:
 
     def generate(self, output_path: str, **kwargs) -> str:
         """Основной метод построения отчета."""
-        include_diagnostics = kwargs.get("include_diagnostics", True)
+        include_diagnostics = bool(kwargs.get("include_diagnostics", True))
         include_matrix_tables = kwargs.get("include_matrix_tables", True)
-        include_fft_plots = bool(kwargs.get("include_fft_plots", True))
+        include_fft_plots = bool(kwargs.get("include_fft_plots", False))
+        include_scans = bool(kwargs.get("include_scans", True))
         harmonic_top_k = int(kwargs.get("harmonic_top_k", 5))
         graph_threshold = kwargs.get("graph_threshold", 0.2)
         p_alpha = kwargs.get("p_alpha", 0.05)
@@ -226,10 +227,16 @@ class HTMLReportGenerator:
                     fft_html = ""
                     if include_fft_plots:
                         try:
-                            fft_b64 = self._plot_fft_b64(self.tool.data[name], f"FFT spectrum: {name}", fs=float(getattr(self.tool, "fs", 1.0)))
-                            fft_html = f"<div><b>FFT график</b>: <img class='inline' src='data:image/png;base64,{fft_b64}'/></div>"
+                            if getattr(self.tool, "data", None) is not None and name in getattr(self.tool, "data").columns:
+                                fft_b64 = self._plot_fft_b64(self.tool.data[name], f"FFT spectrum: {name}", fs=float(getattr(self.tool, "fs", 1.0)))
+                                fft_html = (
+                                    "<div style='margin-top:10px'>"
+                                    "<div class='muted'>FFT спектр</div>"
+                                    f"<img style='max-width:100%;border-radius:10px' src='data:image/png;base64,{fft_b64}'/>"
+                                    "</div>"
+                                )
                         except Exception:
-                            fft_html = "<div><b>FFT график</b>: —</div>"
+                            fft_html = ""
 
                     cards.append(
                         "<div class='card'>"
@@ -367,6 +374,83 @@ class HTMLReportGenerator:
             except Exception:
                 win_curve_html = ""
 
+            scans_html = ""
+            if include_scans:
+                try:
+                    sm = (getattr(self.tool, "results_meta", {}) or {}).get(variant, {}) or {}
+                    sc = sm.get("window_scans") or {}
+                    if isinstance(sc, dict):
+                        blocks = []
+                        pos = sc.get("window_pos") or {}
+                        c = pos.get("curve") or {}
+                        if c.get("x"):
+                            b64 = self._plot_curve_b64(c.get("x", []), c.get("y", []), f"{variant}: quality vs window position", "start")
+                            blocks.append(
+                                "<div style='margin-top:10px'>"
+                                "<div class='muted'>Зависимость качества от положения окна (фикс. window_size)</div>"
+                                f"<img style='max-width:100%;border-radius:10px' src='data:image/png;base64,{b64}'/>"
+                                "</div>"
+                            )
+
+                        ws = sc.get("window_size") or {}
+                        c2 = (ws.get("curve") or {})
+                        if c2.get("x"):
+                            b64 = self._plot_curve_b64(c2.get("x", []), c2.get("y", []), f"{variant}: quality vs window size", "window_size")
+                            blocks.append(
+                                "<div style='margin-top:10px'>"
+                                "<div class='muted'>Зависимость качества от размера окна (best по позиции)</div>"
+                                f"<img style='max-width:100%;border-radius:10px' src='data:image/png;base64,{b64}'/>"
+                                "</div>"
+                            )
+
+                        lg = sc.get("lag") or {}
+                        c3 = (lg.get("curve") or {})
+                        if c3.get("x"):
+                            b64 = self._plot_curve_b64(c3.get("x", []), c3.get("y", []), f"{variant}: quality vs lag", "lag")
+                            blocks.append(
+                                "<div style='margin-top:10px'>"
+                                "<div class='muted'>Зависимость качества от лага (на полном ряде)</div>"
+                                f"<img style='max-width:100%;border-radius:10px' src='data:image/png;base64,{b64}'/>"
+                                "</div>"
+                            )
+
+                        cube_scan = sc.get("cube") or {}
+                        pts = cube_scan.get("points") if isinstance(cube_scan, dict) else None
+                        if pts:
+                            b64 = self._plot_cube3d_b64(list(pts), f"{variant}: window×lag×position")
+                            blocks.append(
+                                "<div style='margin-top:10px'>"
+                                "<div class='muted'>3D: window_size × lag × position (точки)</div>"
+                                f"<img style='max-width:100%;border-radius:10px' src='data:image/png;base64,{b64}'/>"
+                                "</div>"
+                            )
+
+                        # Матрицы для выбранных точек куба (best/median/worst + доп. выборка).
+                        gal = cube_scan.get("gallery") if isinstance(cube_scan, dict) else None
+                        if gal:
+                            car = []
+                            for g in gal:
+                                matg = g.get("matrix")
+                                try:
+                                    q = float(g.get("metric"))
+                                    lbl = f"w={g.get('window_size')} lag={g.get('lag')} start={g.get('start')} q={q:.4g}"
+                                except Exception:
+                                    lbl = f"w={g.get('window_size')} lag={g.get('lag')} start={g.get('start')}"
+                                b64m = self._b64_png(plots.plot_heatmap(matg, f"{variant} heat", labels=cols))
+                                car.append((lbl, b64m))
+                            if car:
+                                blocks.append(
+                                    "<div style='margin-top:10px'>"
+                                    "<div class='muted'>Матрицы для точек куба (best/median/worst + выборка)</div>"
+                                    + self._carousel(car, f"cube_g_{k}")
+                                    + "</div>"
+                                )
+
+                        if blocks:
+                            scans_html = "".join(blocks)
+                except Exception:
+                    scans_html = ""
+
             sections.append(
                 f"<section class='card' id='{anchor}'>"
                 f"<h2>{html.escape(info['title'])}</h2>"
@@ -374,6 +458,7 @@ class HTMLReportGenerator:
                 f"{meta_html}{cube_html}{pair_table_html}"
                 f"{self._carousel(car_items, f'c_{k}')}"
                 f"{win_curve_html}"
+                f"{scans_html}"
                 f"{table_html}"
                 f"</section>"
             )
