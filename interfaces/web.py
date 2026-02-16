@@ -38,8 +38,19 @@ def main() -> None:
             log_transform = st.checkbox("Лог-преобразование (только >0)", value=False)
 
         alpha = st.number_input("P-value alpha (для Granger)", 0.0001, 0.5, 0.05, format="%.4f")
-        window_cube_level = st.selectbox("Анализ окно×лаг×положение", ["off", "basic", "full"], index=1)
-        window_sizes_text = st.text_input("Window sizes (comma)", value="256,512")
+
+        st.markdown("---")
+        col4, col5, col6 = st.columns(3)
+        with col4:
+            window_sizes_text = st.text_input("Окна (window_sizes)", value="256,512")
+            window_policy = st.selectbox("Политика окон", ["best", "none"], index=0)
+        with col5:
+            lag_selection = st.selectbox("Выбор лага", ["optimize", "fixed"], index=0)
+            window_cube_level = st.selectbox("3D window×lag×position", ["off", "basic", "full"], index=1)
+            window_cube_eval_limit = st.number_input("Лимит 3D-оценок", min_value=20, max_value=500, value=60, step=10)
+        with col6:
+            include_fft_plots = st.checkbox("FFT графики в HTML", value=True)
+            harmonic_top_k = st.number_input("Harmonic top_k", min_value=1, max_value=15, value=5)
 
     all_methods = STABLE_METHODS + EXPERIMENTAL_METHODS
     selected_methods = st.multiselect("Выберите методы", all_methods, default=STABLE_METHODS[:2])
@@ -74,16 +85,24 @@ def main() -> None:
                     tool.run_selected_methods(
                         selected_methods,
                         max_lag=lag,
+                        lag_selection=lag_selection,
                         window_sizes=window_sizes,
-                        window_policy="best",
+                        window_policy=window_policy,
                         window_cube_level=window_cube_level,
+                        window_cube_eval_limit=int(window_cube_eval_limit),
                     )
 
                     excel_path = os.path.join(tmp_dir, "report.xlsx")
                     html_path = os.path.join(tmp_dir, "report.html")
 
                     tool.export_big_excel(excel_path, threshold=threshold, p_value_alpha=alpha)
-                    tool.export_html_report(html_path, graph_threshold=threshold, p_alpha=alpha)
+                    tool.export_html_report(
+                        html_path,
+                        graph_threshold=threshold,
+                        p_alpha=alpha,
+                        include_fft_plots=include_fft_plots,
+                        harmonic_top_k=int(harmonic_top_k),
+                    )
 
                     st.success("Готово!")
 

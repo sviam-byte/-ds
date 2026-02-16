@@ -239,3 +239,53 @@ def plot_fft_spectrum(
     plt.close(fig)
     buf.seek(0)
     return buf
+
+
+def plot_window_cube_3d(points: list[dict], title: str) -> BytesIO:
+    """3D scatter: window_size × lag × start_pos, цвет/размер по metric."""
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+    buf = BytesIO()
+    fig = plt.figure(figsize=(7.5, 4.5))
+    ax = fig.add_subplot(111, projection="3d")
+
+    if not points:
+        ax.text2D(0.5, 0.5, "No window×lag×position data", transform=ax.transAxes, ha="center", va="center")
+        ax.set_axis_off()
+        fig.savefig(buf, format="png", dpi=150)
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+
+    ws = np.array([p.get("window_size", np.nan) for p in points], dtype=float)
+    lg = np.array([p.get("lag", np.nan) for p in points], dtype=float)
+    st = np.array([p.get("start", np.nan) for p in points], dtype=float)
+    mt = np.array([p.get("metric", np.nan) for p in points], dtype=float)
+
+    finite = np.isfinite(ws) & np.isfinite(lg) & np.isfinite(st) & np.isfinite(mt)
+    ws, lg, st, mt = ws[finite], lg[finite], st[finite], mt[finite]
+
+    if mt.size == 0:
+        ax.text2D(0.5, 0.5, "No finite metrics", transform=ax.transAxes, ha="center", va="center")
+        ax.set_axis_off()
+        fig.savefig(buf, format="png", dpi=150)
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+
+    m_min, m_max = float(np.min(mt)), float(np.max(mt))
+    denom = (m_max - m_min) if m_max > m_min else 1.0
+    sizes = 18.0 + 60.0 * (mt - m_min) / denom
+
+    sc = ax.scatter(ws, lg, st, c=mt, s=sizes, cmap="viridis", alpha=0.85)
+    fig.colorbar(sc, ax=ax, shrink=0.7, pad=0.08, label="metric")
+
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel("window_size")
+    ax.set_ylabel("lag")
+    ax.set_zlabel("start_pos")
+    plt.tight_layout()
+    fig.savefig(buf, format="png", dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf

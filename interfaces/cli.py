@@ -102,6 +102,8 @@ def _process_single_file(filepath: str, args: argparse.Namespace, out_dir: str) 
             partial_mode=spec.partial_mode,
             pairwise_policy=spec.pairwise_policy,
             custom_controls=spec.custom_controls,
+            window_cube_level=spec.window_cube_level,
+            window_cube_eval_limit=spec.window_cube_eval_limit,
         )
     else:
         tool.load_data_excel(filepath)
@@ -114,7 +116,13 @@ def _process_single_file(filepath: str, args: argparse.Namespace, out_dir: str) 
     html_path = args.report_html or os.path.join(out_dir, f"{name}_report.html")
 
     tool.export_big_excel(excel_path, threshold=args.graph_threshold, p_value_alpha=args.p_alpha)
-    tool.export_html_report(html_path, graph_threshold=args.graph_threshold, p_alpha=args.p_alpha)
+    tool.export_html_report(
+        html_path,
+        graph_threshold=args.graph_threshold,
+        p_alpha=args.p_alpha,
+        include_fft_plots=getattr(spec, "include_fft_plots", True) if user_text else True,
+        harmonic_top_k=getattr(spec, "harmonic_top_k", 5) if user_text else 5,
+    )
     print(f"Processed: {filepath}\n  Excel: {os.path.abspath(excel_path)}\n  HTML:  {os.path.abspath(html_path)}")
 
 
