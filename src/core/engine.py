@@ -1573,6 +1573,9 @@ def analyze_sliding_windows_with_metric(
     stride: int,
     *,
     lag: int = 1,
+    start_min: int | None = None,
+    start_max: int | None = None,
+    max_windows: int = 400,
 ) -> dict:
     """Анализ скользящих окон для заданного window_size.
 
@@ -1601,10 +1604,15 @@ def analyze_sliding_windows_with_metric(
         "matrix": None,
     }
 
+    # Диапазон позиций окна (включительно по start, end=start+w).
+    st0 = int(max(0, start_min)) if start_min is not None else 0
+    st1 = int(min(n - w, start_max)) if start_max is not None else (n - w)
+    st1 = int(max(st0, st1))
+
     # Ограничиваем количество окон, чтобы не взорваться по времени на длинных рядах.
     # Это не запрещает пользователю уменьшить stride, но даёт безопасный дефолт.
-    max_windows = 400
-    starts = list(range(0, max(1, n - w + 1), s))
+    max_windows = int(max(1, max_windows))
+    starts = list(range(st0, st1 + 1, s))
     if len(starts) > max_windows:
         # равномерная подвыборка
         idx = np.linspace(0, len(starts) - 1, max_windows).round().astype(int)
@@ -2075,12 +2083,20 @@ class BigMasterTool:
         # берём максимум из них (чтобы не ломать старые вызовы).
         self.config.max_lag = int(max(self.config.max_lag, int(max_lag)))
 
+        method_options = kwargs.get("method_options") or {}
+        if method_options is None:
+            method_options = {}
+
         used_lags: Dict[str, int] = {}
         for variant in variants:
             if variant not in method_mapping:
                 continue
             try:
-                mat, meta = self._compute_variant_auto(variant, **kwargs)
+                v_kwargs = dict(kwargs)
+                if isinstance(method_options, dict) and isinstance(method_options.get(variant), dict):
+                    # Локальные опции метода перекрывают глобальные kwargs.
+                    v_kwargs.update(method_options.get(variant) or {})
+                mat, meta = self._compute_variant_auto(variant, **v_kwargs)
                 self.results[variant] = mat
                 self.results_meta[variant] = meta
                 if meta.get("chosen_lag") is not None:
@@ -2155,6 +2171,187 @@ class BigMasterTool:
                 "criterion": "mean(|offdiag|)" if not is_pvalue_method(variant) else "mean(-log10(p))",
             }
         meta["chosen_lag"] = int(chosen_lag)
+
+        # --- Диагностические сканы по окнам/лагам/позициям ---
+        scans = {
+            "window_pos": bool(kwargs.get("scan_window_pos", False)),
+            "window_size": bool(kwargs.get("scan_window_size", False)),
+            "lag": bool(kwargs.get("scan_lag", False)),
+            "cube": bool(kwargs.get("scan_cube", False)),
+        }
+
+        w_start_min = kwargs.get("window_start_min")
+        w_start_max = kwargs.get("window_start_max")
+        w_stride = kwargs.get("window_stride")
+        w_max_windows = int(kwargs.get("window_max_windows", 250))
+
+        lag_grid = kwargs.get("lag_grid")
+        if lag_grid is None:
+            lmin = max(1, int(kwargs.get("lag_min", 1)))
+            lmax = max(lmin, int(kwargs.get("lag_max", max_lag)))
+            lstep = max(1, int(kwargs.get("lag_step", 1)))
+            lag_grid = list(range(lmin, lmax + 1, lstep))
+        else:
+            try:
+                lag_grid = [int(x) for x in lag_grid if int(x) >= 1]
+            except Exception:
+                lag_grid = [1]
+            if not lag_grid:
+                lag_grid = [1]
+
+        window_sizes_grid = kwargs.get("window_sizes_grid")
+        if window_sizes_grid is not None:
+            try:
+                window_sizes_grid = [int(x) for x in window_sizes_grid if int(x) >= 2]
+            except Exception:
+                window_sizes_grid = []
+        else:
+            window_sizes_grid = []
+
+        if any(scans.values()):
+            scan_meta: dict = {"flags": scans}
+            ws_fallback = kwargs.get("window_sizes") or self.config.window_sizes or []
+            ws_fallback = [int(w) for w in ws_fallback if int(w) >= 2]
+            ws_list = window_sizes_grid if window_sizes_grid else ws_fallback
+
+            default_w = int(kwargs.get("window_size", ws_list[0] if ws_list else min(200, max(10, len(df) // 5))))
+            default_w = int(max(2, min(default_w, len(df))))
+
+            if scans["window_pos"]:
+                stride = int(w_stride) if w_stride is not None else int(max(1, default_w // 5))
+                info = analyze_sliding_windows_with_metric(
+                    df,
+                    variant,
+                    window_size=default_w,
+                    stride=stride,
+                    lag=int(chosen_lag),
+                    start_min=w_start_min,
+                    start_max=w_start_max,
+                    max_windows=w_max_windows,
+                )
+                scan_meta["window_pos"] = {
+                    "window_size": default_w,
+                    "stride": stride,
+                    "lag": int(chosen_lag),
+                    "curve": info.get("curve") if info else None,
+                    "best_window": info.get("best_window") if info else None,
+                }
+
+            if scans["window_size"] and ws_list:
+                xs, ys, best_starts = [], [], []
+                for w in ws_list:
+                    stride = int(w_stride) if w_stride is not None else int(max(1, int(w) // 5))
+                    info = analyze_sliding_windows_with_metric(
+                        df,
+                        variant,
+                        window_size=int(w),
+                        stride=stride,
+                        lag=int(chosen_lag),
+                        start_min=w_start_min,
+                        start_max=w_start_max,
+                        max_windows=w_max_windows,
+                    )
+                    bw = (info or {}).get("best_window") or {}
+                    q = bw.get("metric", float("nan"))
+                    xs.append(int(w))
+                    ys.append(float(q) if np.isfinite(q) else float("nan"))
+                    best_starts.append(int(bw.get("start", 0)) if bw else 0)
+                scan_meta["window_size"] = {"lag": int(chosen_lag), "curve": {"x": xs, "y": ys, "best_start": best_starts}}
+
+            if scans["lag"] and supports_lag:
+                xs, ys = [], []
+                for lag in lag_grid:
+                    mat_l = _compute_at_lag(df, int(lag))
+                    q = _lag_quality(variant, mat_l)
+                    xs.append(int(lag))
+                    ys.append(float(q) if np.isfinite(q) else float("nan"))
+                scan_meta["lag"] = {"curve": {"x": xs, "y": ys}, "grid": lag_grid}
+
+            if scans["cube"] and ws_list:
+                combo_limit = max(1, int(kwargs.get("cube_combo_limit", 80)))
+                points: list[dict] = []
+                lags_for_cube = lag_grid if supports_lag else [1]
+                combos = [(int(w), int(lg)) for w in ws_list for lg in lags_for_cube]
+                if len(combos) > combo_limit:
+                    idx = np.linspace(0, len(combos) - 1, combo_limit).round().astype(int)
+                    combos = [combos[i] for i in idx]
+
+                for w, lg in combos:
+                    stride = int(w_stride) if w_stride is not None else int(max(1, int(w) // 5))
+                    info = analyze_sliding_windows_with_metric(
+                        df,
+                        variant,
+                        window_size=w,
+                        stride=stride,
+                        lag=lg,
+                        start_min=w_start_min,
+                        start_max=w_start_max,
+                        max_windows=w_max_windows,
+                    )
+                    curve = (info or {}).get("curve") or {}
+                    for st, q in zip(curve.get("x") or [], curve.get("y") or []):
+                        try:
+                            fq = float(q)
+                        except Exception:
+                            continue
+                        if np.isfinite(fq):
+                            points.append({"window_size": int(w), "lag": int(lg), "start": int(st), "metric": fq})
+
+                scan_meta["cube"] = {
+                    "points": points,
+                    "combos": combos,
+                    "lag_grid": lags_for_cube,
+                    "window_sizes": ws_list,
+                }
+
+                # Матрицы для выбранных точек 3D-куба (best/median/worst + выборка).
+                gallery_k = max(1, int(kwargs.get("cube_gallery_k", 1)))
+                gallery_limit = max(3, int(kwargs.get("cube_gallery_limit", 60)))
+                gallery_mode = str(kwargs.get("cube_gallery_mode", "extremes") or "extremes").lower()
+
+                pts_sorted = [p for p in points if np.isfinite(float(p.get("metric", float("nan"))))]
+                pts_sorted.sort(key=lambda p: float(p.get("metric", float("nan"))))
+                if pts_sorted:
+                    idx_set = {0, len(pts_sorted) // 2, len(pts_sorted) - 1}
+
+                    if gallery_mode in {"topbottom", "extremes"}:
+                        for i in range(gallery_k):
+                            idx_set.add(min(i, len(pts_sorted) - 1))
+                            idx_set.add(max(0, len(pts_sorted) - 1 - i))
+
+                    if gallery_mode == "quantiles":
+                        for q in (0.1, 0.25, 0.5, 0.75, 0.9):
+                            idx_set.add(int(round(q * (len(pts_sorted) - 1))))
+
+                    idx_list = sorted(idx_set)
+                    if len(idx_list) > gallery_limit:
+                        sel = np.linspace(0, len(idx_list) - 1, gallery_limit).round().astype(int)
+                        idx_list = [idx_list[i] for i in sel]
+
+                    gallery = []
+                    for ii in idx_list:
+                        p = pts_sorted[ii]
+                        w0 = int(p.get("window_size"))
+                        lg0 = int(p.get("lag"))
+                        st0 = int(p.get("start"))
+                        try:
+                            chunk = df.iloc[st0: st0 + w0]
+                            mat0 = compute_connectivity_variant(chunk, variant, lag=int(max(1, lg0)))
+                        except Exception:
+                            mat0 = None
+                        gallery.append(
+                            {
+                                "window_size": w0,
+                                "lag": lg0,
+                                "start": st0,
+                                "metric": float(p.get("metric")),
+                                "matrix": mat0,
+                            }
+                        )
+
+                    scan_meta["cube"]["gallery"] = gallery
+
+            meta["window_scans"] = scan_meta
 
         # --- windowing ---
         window_sizes = kwargs.get("window_sizes") or self.config.window_sizes
@@ -2474,5 +2671,3 @@ if __name__ == "__main__":
         )
 
     print("Анализ завершён, результаты сохранены в:", output_path)
-
-

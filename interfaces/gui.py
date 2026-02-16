@@ -12,6 +12,7 @@ import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import json
 
 import pandas as pd
 
@@ -37,6 +38,34 @@ class App(tk.Tk):
         self.auto_diff = tk.BooleanVar(value=False)
         self.p_correction = tk.StringVar(value="none")
         self.method_vars: dict[str, tk.BooleanVar] = {}
+
+        # Вывод/отчёт
+        self.output_mode = tk.StringVar(value="both")  # both|html|excel
+        self.include_diagnostics = tk.BooleanVar(value=True)
+        self.include_fft_plots = tk.BooleanVar(value=False)
+
+        # Скан-параметры (window/lag/position)
+        self.scan_window_pos = tk.BooleanVar(value=False)
+        self.scan_window_size = tk.BooleanVar(value=False)
+        self.scan_lag = tk.BooleanVar(value=False)
+        self.scan_cube = tk.BooleanVar(value=False)
+
+        self.window_sizes_text = tk.StringVar(value="")  # например: 50,100,150
+        self.window_size_default = tk.IntVar(value=100)
+        self.window_stride = tk.IntVar(value=0)  # 0 => auto
+        self.window_start_min = tk.IntVar(value=0)
+        self.window_start_max = tk.IntVar(value=0)  # 0 => auto
+        self.window_max_windows = tk.IntVar(value=250)
+
+        self.lag_min = tk.IntVar(value=1)
+        self.lag_max = tk.IntVar(value=5)
+        self.lag_step = tk.IntVar(value=1)
+        self.cube_combo_limit = tk.IntVar(value=80)
+
+        # Cube gallery (матрицы в отчёте для выбранных точек куба)
+        self.cube_gallery_mode = tk.StringVar(value="extremes")  # extremes|topbottom|quantiles
+        self.cube_gallery_k = tk.IntVar(value=1)
+        self.cube_gallery_limit = tk.IntVar(value=60)
 
         self._init_ui()
 
@@ -138,6 +167,76 @@ class App(tk.Tk):
             width=10,
         ).pack(side="left")
 
+        ttk.Label(p_frame, text="Вывод:").pack(side="left", padx=(15, 5))
+        ttk.Combobox(
+            p_frame,
+            textvariable=self.output_mode,
+            values=["both", "html", "excel"],
+            state="readonly",
+            width=8,
+        ).pack(side="left")
+
+        ttk.Checkbutton(p_frame, text="Первичный анализ", variable=self.include_diagnostics).pack(side="left", padx=10)
+        ttk.Checkbutton(p_frame, text="FFT графики", variable=self.include_fft_plots).pack(side="left", padx=6)
+
+        scans = ttk.LabelFrame(frame, text="Сканы window/lag/position (опционально)", padding=6)
+        scans.pack(fill="x", pady=6)
+
+        r0 = ttk.Frame(scans)
+        r0.pack(fill="x", pady=2)
+        ttk.Checkbutton(r0, text="pos", variable=self.scan_window_pos).pack(side="left")
+        ttk.Checkbutton(r0, text="window_size", variable=self.scan_window_size).pack(side="left", padx=10)
+        ttk.Checkbutton(r0, text="lag", variable=self.scan_lag).pack(side="left", padx=10)
+        ttk.Checkbutton(r0, text="cube (3D)", variable=self.scan_cube).pack(side="left", padx=10)
+
+        r1 = ttk.Frame(scans)
+        r1.pack(fill="x", pady=2)
+        ttk.Label(r1, text="window_sizes:").pack(side="left")
+        ttk.Entry(r1, textvariable=self.window_sizes_text, width=24).pack(side="left", padx=5)
+        ttk.Label(r1, text="default_w:").pack(side="left", padx=(15, 0))
+        ttk.Entry(r1, textvariable=self.window_size_default, width=6).pack(side="left", padx=5)
+        ttk.Label(r1, text="stride:").pack(side="left", padx=(15, 0))
+        ttk.Entry(r1, textvariable=self.window_stride, width=6).pack(side="left", padx=5)
+        ttk.Label(r1, text="max_windows:").pack(side="left", padx=(15, 0))
+        ttk.Entry(r1, textvariable=self.window_max_windows, width=6).pack(side="left", padx=5)
+
+        r2 = ttk.Frame(scans)
+        r2.pack(fill="x", pady=2)
+        ttk.Label(r2, text="start_min:").pack(side="left")
+        ttk.Entry(r2, textvariable=self.window_start_min, width=8).pack(side="left", padx=5)
+        ttk.Label(r2, text="start_max (0=auto):").pack(side="left", padx=(10, 0))
+        ttk.Entry(r2, textvariable=self.window_start_max, width=8).pack(side="left", padx=5)
+        ttk.Label(r2, text="lag_min/max/step:").pack(side="left", padx=(10, 0))
+        ttk.Entry(r2, textvariable=self.lag_min, width=4).pack(side="left", padx=2)
+        ttk.Entry(r2, textvariable=self.lag_max, width=4).pack(side="left", padx=2)
+        ttk.Entry(r2, textvariable=self.lag_step, width=4).pack(side="left", padx=2)
+        ttk.Label(r2, text="cube combos:").pack(side="left", padx=(10, 0))
+        ttk.Entry(r2, textvariable=self.cube_combo_limit, width=6).pack(side="left", padx=5)
+
+        r3 = ttk.Frame(scans)
+        r3.pack(fill="x", pady=2)
+        ttk.Label(r3, text="cube gallery:").pack(side="left")
+        ttk.Combobox(
+            r3,
+            textvariable=self.cube_gallery_mode,
+            values=["extremes", "topbottom", "quantiles"],
+            state="readonly",
+            width=12,
+        ).pack(side="left", padx=5)
+        ttk.Label(r3, text="k:").pack(side="left", padx=(10, 0))
+        ttk.Entry(r3, textvariable=self.cube_gallery_k, width=4).pack(side="left", padx=5)
+        ttk.Label(r3, text="limit:").pack(side="left", padx=(10, 0))
+        ttk.Entry(r3, textvariable=self.cube_gallery_limit, width=6).pack(side="left", padx=5)
+
+        adv = ttk.LabelFrame(frame, text="Advanced per-method options (JSON, optional)", padding=6)
+        adv.pack(fill="both", expand=False, pady=6)
+        self.method_options_text = tk.Text(adv, height=4)
+        self.method_options_text.pack(fill="both", expand=True)
+        self.method_options_text.insert(
+            "1.0",
+            '{\n  "correlation_full": {"scan_cube": true},\n  "granger_full": {"scan_lag": true, "lag_min": 1, "lag_max": 10}\n}',
+        )
+
         m_frame = ttk.LabelFrame(frame, text="Методы", padding=5)
         m_frame.pack(fill="both", expand=True, pady=10)
 
@@ -195,15 +294,74 @@ class App(tk.Tk):
                     if p is not None and p > 0.05:
                         tool.data[c] = tool.data[c].diff().fillna(0)
 
-        tool.run_selected_methods(methods, max_lag=cfg.max_lag)
+        # --- parse window sizes grid ---
+        w_sizes = None
+        txt = (self.window_sizes_text.get() or "").strip()
+        if txt:
+            try:
+                w_sizes = [int(x.strip()) for x in txt.replace("[", "").replace("]", "").split(",") if x.strip()]
+                w_sizes = [w for w in w_sizes if w >= 2]
+            except Exception:
+                w_sizes = None
+
+        # --- per-method overrides ---
+        method_options = {}
+        try:
+            raw = (self.method_options_text.get("1.0", "end") or "").strip()
+            if raw:
+                method_options = json.loads(raw)
+        except Exception:
+            method_options = {}
+
+        # --- scan params ---
+        stride = int(self.window_stride.get())
+        stride = None if stride <= 0 else stride
+        start_max = int(self.window_start_max.get())
+        start_max = None if start_max <= 0 else start_max
+
+        tool.run_selected_methods(
+            methods,
+            max_lag=cfg.max_lag,
+            window_sizes_grid=w_sizes,
+            window_size=int(self.window_size_default.get()),
+            window_stride=stride,
+            window_start_min=int(self.window_start_min.get()),
+            window_start_max=start_max,
+            window_max_windows=int(self.window_max_windows.get()),
+            scan_window_pos=bool(self.scan_window_pos.get()),
+            scan_window_size=bool(self.scan_window_size.get()),
+            scan_lag=bool(self.scan_lag.get()),
+            scan_cube=bool(self.scan_cube.get()),
+            lag_min=int(self.lag_min.get()),
+            lag_max=int(self.lag_max.get()),
+            lag_step=int(self.lag_step.get()),
+            cube_combo_limit=int(self.cube_combo_limit.get()),
+            cube_gallery_mode=str(self.cube_gallery_mode.get()),
+            cube_gallery_k=int(self.cube_gallery_k.get()),
+            cube_gallery_limit=int(self.cube_gallery_limit.get()),
+            method_options=method_options,
+        )
 
         os.makedirs(out_dir, exist_ok=True)
         html_path = os.path.join(out_dir, f"{name_prefix}_report.html")
         excel_path = os.path.join(out_dir, f"{name_prefix}_full.xlsx")
 
-        tool.export_html_report(html_path, graph_threshold=cfg.graph_threshold, p_alpha=cfg.p_value_alpha)
-        tool.export_big_excel(excel_path, threshold=cfg.graph_threshold, p_value_alpha=cfg.p_value_alpha)
-        return html_path
+        mode = (self.output_mode.get() or "both").lower()
+        do_html = mode in ("both", "html")
+        do_excel = mode in ("both", "excel")
+
+        if do_html:
+            tool.export_html_report(
+                html_path,
+                graph_threshold=cfg.graph_threshold,
+                p_alpha=cfg.p_value_alpha,
+                include_diagnostics=bool(self.include_diagnostics.get()),
+                include_fft_plots=bool(self.include_fft_plots.get()),
+                include_scans=True,
+            )
+        if do_excel:
+            tool.export_big_excel(excel_path, threshold=cfg.graph_threshold, p_value_alpha=cfg.p_value_alpha)
+        return html_path if do_html else None
 
     def _run_single(self) -> None:
         fp = self.file_path.get()
