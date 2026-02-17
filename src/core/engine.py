@@ -1576,13 +1576,16 @@ def analyze_sliding_windows_with_metric(
     start_min: int | None = None,
     start_max: int | None = None,
     max_windows: int = 400,
+    return_matrices: bool = False,
 ) -> dict:
     """Анализ скользящих окон для заданного window_size.
 
     Возвращает структуру для HTML-отчёта:
       {
         "best_window": {"start": int, "end": int, "metric": float, "matrix": np.ndarray},
-        "curve": {"x": [start_idx...], "y": [metric...]}
+        "curve": {"x": [start_idx...], "y": [metric...]},
+        "ticks": [{"start":..,"end":..,"metric":..,"matrix":..|None}, ...],
+        "extremes": {"best": idx|None, "median": idx|None, "worst": idx|None}
       }
 
     stride — шаг сдвига окна (в точках), lag — лаг (только для lagged-методов).
@@ -1596,6 +1599,7 @@ def analyze_sliding_windows_with_metric(
 
     xs: List[int] = []
     ys: List[float] = []
+    ticks: list[dict] = []
 
     best = {
         "start": 0,
@@ -1634,6 +1638,15 @@ def analyze_sliding_windows_with_metric(
         xs.append(int(start))
         ys.append(float(score) if np.isfinite(score) else float("nan"))
 
+        ticks.append(
+            {
+                "start": int(start),
+                "end": int(end),
+                "metric": float(score) if np.isfinite(score) else float("nan"),
+                "matrix": mat if return_matrices else None,
+            }
+        )
+
         if np.isfinite(score) and float(score) > float(best["metric"]):
             best = {
                 "start": int(start),
@@ -1645,7 +1658,34 @@ def analyze_sliding_windows_with_metric(
     return {
         "best_window": best,
         "curve": {"x": xs, "y": ys},
+        "ticks": ticks,
+        "extremes": _select_best_median_worst(ticks, key="metric"),
     }
+
+
+def _select_best_median_worst(items: list[dict], *, key: str = "metric") -> dict:
+    """Возвращает индексы best/median/worst по значению key (с учётом NaN)."""
+    if not items:
+        return {"best": None, "median": None, "worst": None}
+
+    vals: list[tuple[int, float]] = []
+    for i, it in enumerate(items):
+        try:
+            v = float(it.get(key, float("nan")))
+        except Exception:
+            v = float("nan")
+        if np.isfinite(v):
+            vals.append((i, v))
+
+    if not vals:
+        return {"best": None, "median": None, "worst": None}
+
+    vals_sorted = sorted(vals, key=lambda t: t[1])
+    worst_i = int(vals_sorted[0][0])
+    best_i = int(vals_sorted[-1][0])
+    med_val = float(np.median([v for _, v in vals_sorted]))
+    median_i = int(min(vals_sorted, key=lambda t: abs(t[1] - med_val))[0])
+    return {"best": best_i, "median": median_i, "worst": worst_i}
 
 
 def sliding_window_pairwise_analysis(
@@ -2214,61 +2254,104 @@ class BigMasterTool:
             ws_fallback = [int(w) for w in ws_fallback if int(w) >= 2]
             ws_list = window_sizes_grid if window_sizes_grid else ws_fallback
 
+            # Если список размеров окна пуст — можно собрать его из window_min/max/step.
+            if not ws_list:
+                try:
+                    wmin = int(kwargs.get("window_min", 0) or 0)
+                    wmax = int(kwargs.get("window_max", 0) or 0)
+                    wstep = int(kwargs.get("window_step", 0) or 0)
+                    if wmin >= 2 and wmax >= wmin and wstep >= 1:
+                        ws_list = list(range(wmin, wmax + 1, wstep))
+                except Exception:
+                    ws_list = []
+
             default_w = int(kwargs.get("window_size", ws_list[0] if ws_list else min(200, max(10, len(df) // 5))))
             default_w = int(max(2, min(default_w, len(df))))
 
             if scans["window_pos"]:
                 stride = int(w_stride) if w_stride is not None else int(max(1, default_w // 5))
                 info = analyze_sliding_windows_with_metric(
-                    df,
-                    variant,
-                    window_size=default_w,
-                    stride=stride,
-                    lag=int(chosen_lag),
-                    start_min=w_start_min,
-                    start_max=w_start_max,
-                    max_windows=w_max_windows,
+                    df, variant, window_size=default_w, stride=stride, lag=int(chosen_lag),
+                    start_min=w_start_min, start_max=w_start_max, max_windows=w_max_windows,
+                    return_matrices=True,
                 )
+                ticks = []
+                for i, t in enumerate((info or {}).get("ticks") or []):
+                    tid = f"pos_w{default_w}_l{int(chosen_lag)}_i{i}_s{int(t.get('start', 0))}"
+                    ticks.append({"id": tid, **t})
+                ext = (info or {}).get("extremes") or {}
+                ext_ids = {
+                    "best": ticks[ext.get("best")]["id"] if ticks and ext.get("best") is not None else None,
+                    "median": ticks[ext.get("median")]["id"] if ticks and ext.get("median") is not None else None,
+                    "worst": ticks[ext.get("worst")]["id"] if ticks and ext.get("worst") is not None else None,
+                }
                 scan_meta["window_pos"] = {
-                    "window_size": default_w,
-                    "stride": stride,
-                    "lag": int(chosen_lag),
+                    "window_size": default_w, "stride": stride, "lag": int(chosen_lag),
                     "curve": info.get("curve") if info else None,
                     "best_window": info.get("best_window") if info else None,
+                    "ticks": ticks,
+                    "extremes": ext_ids,
                 }
 
             if scans["window_size"] and ws_list:
-                xs, ys, best_starts = [], [], []
+                xs, ys = [], []
+                ticks = []
                 for w in ws_list:
                     stride = int(w_stride) if w_stride is not None else int(max(1, int(w) // 5))
                     info = analyze_sliding_windows_with_metric(
-                        df,
-                        variant,
-                        window_size=int(w),
-                        stride=stride,
-                        lag=int(chosen_lag),
-                        start_min=w_start_min,
-                        start_max=w_start_max,
-                        max_windows=w_max_windows,
+                        df, variant, window_size=int(w), stride=stride, lag=int(chosen_lag),
+                        start_min=w_start_min, start_max=w_start_max, max_windows=w_max_windows,
+                        return_matrices=False,
                     )
                     bw = (info or {}).get("best_window") or {}
                     q = bw.get("metric", float("nan"))
                     xs.append(int(w))
                     ys.append(float(q) if np.isfinite(q) else float("nan"))
-                    best_starts.append(int(bw.get("start", 0)) if bw else 0)
-                scan_meta["window_size"] = {"lag": int(chosen_lag), "curve": {"x": xs, "y": ys, "best_start": best_starts}}
+                    tid = f"size_w{int(w)}_l{int(chosen_lag)}"
+                    ticks.append({
+                        "id": tid,
+                        "window_size": int(w),
+                        "start": int(bw.get("start", 0)) if bw else 0,
+                        "end": int(bw.get("end", 0)) if bw else 0,
+                        "metric": float(q) if np.isfinite(q) else float("nan"),
+                        "matrix": bw.get("matrix"),
+                    })
+                ext = _select_best_median_worst(ticks, key="metric")
+                ext_ids = {
+                    "best": ticks[ext.get("best")]["id"] if ticks and ext.get("best") is not None else None,
+                    "median": ticks[ext.get("median")]["id"] if ticks and ext.get("median") is not None else None,
+                    "worst": ticks[ext.get("worst")]["id"] if ticks and ext.get("worst") is not None else None,
+                }
+                scan_meta["window_size"] = {"lag": int(chosen_lag), "curve": {"x": xs, "y": ys}, "ticks": ticks, "extremes": ext_ids}
 
             if scans["lag"] and supports_lag:
                 xs, ys = [], []
+                ticks = []
                 for lag in lag_grid:
                     mat_l = _compute_at_lag(df, int(lag))
                     q = _lag_quality(variant, mat_l)
                     xs.append(int(lag))
                     ys.append(float(q) if np.isfinite(q) else float("nan"))
-                scan_meta["lag"] = {"curve": {"x": xs, "y": ys}, "grid": lag_grid}
+                    tid = f"lag_l{int(lag)}"
+                    ticks.append({"id": tid, "lag": int(lag), "metric": float(q) if np.isfinite(q) else float("nan"), "matrix": mat_l})
+                ext = _select_best_median_worst(ticks, key="metric")
+                ext_ids = {
+                    "best": ticks[ext.get("best")]["id"] if ticks and ext.get("best") is not None else None,
+                    "median": ticks[ext.get("median")]["id"] if ticks and ext.get("median") is not None else None,
+                    "worst": ticks[ext.get("worst")]["id"] if ticks and ext.get("worst") is not None else None,
+                }
+                scan_meta["lag"] = {"curve": {"x": xs, "y": ys}, "grid": lag_grid, "ticks": ticks, "extremes": ext_ids}
 
             if scans["cube"] and ws_list:
                 combo_limit = max(1, int(kwargs.get("cube_combo_limit", 80)))
+                cube_eval_limit = int(kwargs.get("cube_eval_limit", 0) or 0)
+                cube_matrix_mode = str(kwargs.get("cube_matrix_mode", "selected") or "selected").lower()
+                if cube_matrix_mode not in {"selected", "all"}:
+                    cube_matrix_mode = "selected"
+                cube_matrix_limit = int(kwargs.get("cube_matrix_limit", 0) or 0)
+                if cube_matrix_limit <= 0:
+                    cube_matrix_limit = cube_eval_limit if cube_eval_limit > 0 else 500
+
                 points: list[dict] = []
                 lags_for_cube = lag_grid if supports_lag else [1]
                 combos = [(int(w), int(lg)) for w in ws_list for lg in lags_for_cube]
@@ -2276,33 +2359,83 @@ class BigMasterTool:
                     idx = np.linspace(0, len(combos) - 1, combo_limit).round().astype(int)
                     combos = [combos[i] for i in idx]
 
+                per_combo_max_windows = int(w_max_windows)
+                if cube_eval_limit and len(combos) > 0:
+                    per_combo_max_windows = max(1, min(int(w_max_windows), int(cube_eval_limit) // int(len(combos))))
+                saved_mats = 0
+
                 for w, lg in combos:
                     stride = int(w_stride) if w_stride is not None else int(max(1, int(w) // 5))
                     info = analyze_sliding_windows_with_metric(
-                        df,
-                        variant,
-                        window_size=w,
-                        stride=stride,
-                        lag=lg,
-                        start_min=w_start_min,
-                        start_max=w_start_max,
-                        max_windows=w_max_windows,
+                        df, variant, window_size=w, stride=stride, lag=lg,
+                        start_min=w_start_min, start_max=w_start_max,
+                        max_windows=per_combo_max_windows,
+                        return_matrices=(cube_matrix_mode == "all"),
                     )
-                    curve = (info or {}).get("curve") or {}
-                    for st, q in zip(curve.get("x") or [], curve.get("y") or []):
+                    for t in (info or {}).get("ticks") or []:
                         try:
-                            fq = float(q)
+                            fq = float(t.get("metric", float("nan")))
                         except Exception:
+                            fq = float("nan")
+                        if not np.isfinite(fq):
                             continue
-                        if np.isfinite(fq):
-                            points.append({"window_size": int(w), "lag": int(lg), "start": int(st), "metric": fq})
+                        st0 = int(t.get("start", 0))
+                        tid = f"cube_w{int(w)}_l{int(lg)}_s{st0}"
+                        mat0 = t.get("matrix")
+                        if cube_matrix_mode == "all":
+                            if mat0 is not None and saved_mats < cube_matrix_limit:
+                                saved_mats += 1
+                            else:
+                                mat0 = None
+                        points.append({
+                            "id": tid,
+                            "window_size": int(w), "lag": int(lg),
+                            "start": st0, "end": int(t.get("end", st0 + int(w))),
+                            "metric": fq,
+                            "matrix": mat0,
+                        })
 
                 scan_meta["cube"] = {
-                    "points": points,
-                    "combos": combos,
+                    "points": points, "combos": combos,
                     "lag_grid": lags_for_cube,
                     "window_sizes": ws_list,
+                    "eval_limit": int(cube_eval_limit) if cube_eval_limit else None,
+                    "matrix_mode": cube_matrix_mode,
+                    "matrix_limit": int(cube_matrix_limit),
                 }
+
+                ext = _select_best_median_worst(points, key="metric")
+                ext_ids = {
+                    "best": points[ext.get("best")]["id"] if points and ext.get("best") is not None else None,
+                    "median": points[ext.get("median")]["id"] if points and ext.get("median") is not None else None,
+                    "worst": points[ext.get("worst")]["id"] if points and ext.get("worst") is not None else None,
+                }
+                scan_meta["cube"]["extremes"] = ext_ids
+                if ext.get("best") is not None:
+                    points[int(ext["best"])]["tag"] = "best"
+                if ext.get("median") is not None:
+                    points[int(ext["median"])]["tag"] = "median"
+                if ext.get("worst") is not None:
+                    points[int(ext["worst"])]["tag"] = "worst"
+
+                if cube_matrix_mode == "all":
+                    must = [ext.get("best"), ext.get("median"), ext.get("worst")]
+                    for ii in must:
+                        if ii is None:
+                            continue
+                        ii = int(ii)
+                        if ii < 0 or ii >= len(points):
+                            continue
+                        if points[ii].get("matrix") is not None:
+                            continue
+                        try:
+                            w0 = int(points[ii].get("window_size"))
+                            lg0 = int(points[ii].get("lag"))
+                            st0 = int(points[ii].get("start"))
+                            chunk = df.iloc[st0 : st0 + w0]
+                            points[ii]["matrix"] = compute_connectivity_variant(chunk, variant, lag=int(max(1, lg0)))
+                        except Exception:
+                            points[ii]["matrix"] = None
 
                 # Матрицы для выбранных точек 3D-куба (best/median/worst + выборка).
                 gallery_k = max(1, int(kwargs.get("cube_gallery_k", 1)))
@@ -2334,22 +2467,32 @@ class BigMasterTool:
                         w0 = int(p.get("window_size"))
                         lg0 = int(p.get("lag"))
                         st0 = int(p.get("start"))
+                        tid0 = p.get("id") or f"cube_w{w0}_l{lg0}_s{st0}"
                         try:
-                            chunk = df.iloc[st0: st0 + w0]
+                            chunk = df.iloc[st0 : st0 + w0]
                             mat0 = compute_connectivity_variant(chunk, variant, lag=int(max(1, lg0)))
                         except Exception:
                             mat0 = None
                         gallery.append(
                             {
+                                "id": tid0,
                                 "window_size": w0,
                                 "lag": lg0,
                                 "start": st0,
+                                "end": int(st0 + w0),
                                 "metric": float(p.get("metric")),
+                                "tag": p.get("tag"),
                                 "matrix": mat0,
                             }
                         )
 
                     scan_meta["cube"]["gallery"] = gallery
+                    scan_meta["cube"]["selectable_ids"] = [g.get("id") for g in gallery if g.get("matrix") is not None]
+                else:
+                    scan_meta["cube"]["selectable_ids"] = []
+
+                if cube_matrix_mode == "all":
+                    scan_meta["cube"]["selectable_ids"] = [p.get("id") for p in points if p.get("matrix") is not None]
 
             meta["window_scans"] = scan_meta
 

@@ -43,6 +43,8 @@ class App(tk.Tk):
         self.output_mode = tk.StringVar(value="both")  # both|html|excel
         self.include_diagnostics = tk.BooleanVar(value=True)
         self.include_fft_plots = tk.BooleanVar(value=False)
+        self.include_scans = tk.BooleanVar(value=True)
+        self.include_matrix_tables = tk.BooleanVar(value=False)
 
         # Скан-параметры (window/lag/position)
         self.scan_window_pos = tk.BooleanVar(value=False)
@@ -50,17 +52,23 @@ class App(tk.Tk):
         self.scan_lag = tk.BooleanVar(value=False)
         self.scan_cube = tk.BooleanVar(value=False)
 
-        self.window_sizes_text = tk.StringVar(value="")  # например: 50,100,150
-        self.window_size_default = tk.IntVar(value=100)
+        self.window_sizes_text = tk.StringVar(value="64,128,192")
+        self.window_min = tk.IntVar(value=64)
+        self.window_max = tk.IntVar(value=192)
+        self.window_step = tk.IntVar(value=64)
+        self.window_size_default = tk.IntVar(value=128)
         self.window_stride = tk.IntVar(value=0)  # 0 => auto
         self.window_start_min = tk.IntVar(value=0)
         self.window_start_max = tk.IntVar(value=0)  # 0 => auto
-        self.window_max_windows = tk.IntVar(value=250)
+        self.window_max_windows = tk.IntVar(value=60)
 
         self.lag_min = tk.IntVar(value=1)
-        self.lag_max = tk.IntVar(value=5)
+        self.lag_max = tk.IntVar(value=3)
         self.lag_step = tk.IntVar(value=1)
-        self.cube_combo_limit = tk.IntVar(value=80)
+        self.cube_combo_limit = tk.IntVar(value=9)
+        self.cube_eval_limit = tk.IntVar(value=225)
+        self.cube_matrix_mode = tk.StringVar(value="all")  # selected|all
+        self.cube_matrix_limit = tk.IntVar(value=225)
 
         # Cube gallery (матрицы в отчёте для выбранных точек куба)
         self.cube_gallery_mode = tk.StringVar(value="extremes")  # extremes|topbottom|quantiles
@@ -178,6 +186,8 @@ class App(tk.Tk):
 
         ttk.Checkbutton(p_frame, text="Первичный анализ", variable=self.include_diagnostics).pack(side="left", padx=10)
         ttk.Checkbutton(p_frame, text="FFT графики", variable=self.include_fft_plots).pack(side="left", padx=6)
+        ttk.Checkbutton(p_frame, text="Сканы", variable=self.include_scans).pack(side="left", padx=6)
+        ttk.Checkbutton(p_frame, text="Таблицы матриц", variable=self.include_matrix_tables).pack(side="left", padx=6)
 
         scans = ttk.LabelFrame(frame, text="Сканы window/lag/position (опционально)", padding=6)
         scans.pack(fill="x", pady=6)
@@ -200,6 +210,15 @@ class App(tk.Tk):
         ttk.Label(r1, text="max_windows:").pack(side="left", padx=(15, 0))
         ttk.Entry(r1, textvariable=self.window_max_windows, width=6).pack(side="left", padx=5)
 
+        r1b = ttk.Frame(scans)
+        r1b.pack(fill="x", pady=2)
+        ttk.Label(r1b, text="window_min/max/step:").pack(side="left")
+        ttk.Entry(r1b, textvariable=self.window_min, width=6).pack(side="left", padx=2)
+        ttk.Entry(r1b, textvariable=self.window_max, width=6).pack(side="left", padx=2)
+        ttk.Entry(r1b, textvariable=self.window_step, width=6).pack(side="left", padx=2)
+        ttk.Label(r1b, text="cube_eval_limit:").pack(side="left", padx=(10, 0))
+        ttk.Entry(r1b, textvariable=self.cube_eval_limit, width=8).pack(side="left", padx=5)
+
         r2 = ttk.Frame(scans)
         r2.pack(fill="x", pady=2)
         ttk.Label(r2, text="start_min:").pack(side="left")
@@ -212,6 +231,10 @@ class App(tk.Tk):
         ttk.Entry(r2, textvariable=self.lag_step, width=4).pack(side="left", padx=2)
         ttk.Label(r2, text="cube combos:").pack(side="left", padx=(10, 0))
         ttk.Entry(r2, textvariable=self.cube_combo_limit, width=6).pack(side="left", padx=5)
+        ttk.Label(r2, text="cube_matrix_mode:").pack(side="left", padx=(10, 0))
+        ttk.Combobox(r2, textvariable=self.cube_matrix_mode, values=["selected", "all"], state="readonly", width=9).pack(side="left", padx=5)
+        ttk.Label(r2, text="matrix_limit:").pack(side="left", padx=(10, 0))
+        ttk.Entry(r2, textvariable=self.cube_matrix_limit, width=8).pack(side="left", padx=5)
 
         r3 = ttk.Frame(scans)
         r3.pack(fill="x", pady=2)
@@ -303,6 +326,15 @@ class App(tk.Tk):
                 w_sizes = [w for w in w_sizes if w >= 2]
             except Exception:
                 w_sizes = None
+        if not w_sizes:
+            try:
+                wmin = int(self.window_min.get())
+                wmax = int(self.window_max.get())
+                wstep = int(self.window_step.get())
+                if wmin >= 2 and wmax >= wmin and wstep >= 1:
+                    w_sizes = list(range(wmin, wmax + 1, wstep))
+            except Exception:
+                pass
 
         # --- per-method overrides ---
         method_options = {}
@@ -323,6 +355,9 @@ class App(tk.Tk):
             methods,
             max_lag=cfg.max_lag,
             window_sizes_grid=w_sizes,
+            window_min=int(self.window_min.get()),
+            window_max=int(self.window_max.get()),
+            window_step=int(self.window_step.get()),
             window_size=int(self.window_size_default.get()),
             window_stride=stride,
             window_start_min=int(self.window_start_min.get()),
@@ -336,6 +371,9 @@ class App(tk.Tk):
             lag_max=int(self.lag_max.get()),
             lag_step=int(self.lag_step.get()),
             cube_combo_limit=int(self.cube_combo_limit.get()),
+            cube_eval_limit=int(self.cube_eval_limit.get()),
+            cube_matrix_mode=str(self.cube_matrix_mode.get()),
+            cube_matrix_limit=int(self.cube_matrix_limit.get()),
             cube_gallery_mode=str(self.cube_gallery_mode.get()),
             cube_gallery_k=int(self.cube_gallery_k.get()),
             cube_gallery_limit=int(self.cube_gallery_limit.get()),
@@ -357,7 +395,8 @@ class App(tk.Tk):
                 p_alpha=cfg.p_value_alpha,
                 include_diagnostics=bool(self.include_diagnostics.get()),
                 include_fft_plots=bool(self.include_fft_plots.get()),
-                include_scans=True,
+                include_scans=bool(self.include_scans.get()),
+                include_matrix_tables=bool(self.include_matrix_tables.get()),
             )
         if do_excel:
             tool.export_big_excel(excel_path, threshold=cfg.graph_threshold, p_value_alpha=cfg.p_value_alpha)

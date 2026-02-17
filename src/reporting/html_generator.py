@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import html
+import json
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -51,6 +52,210 @@ class HTMLReportGenerator:
     def _plot_cube3d_b64(self, points, title: str) -> str:
         """Возвращает base64 PNG с 3D-графиком window×lag×position."""
         return self._b64_png(plots.plot_window_cube_3d(points, title))
+
+
+    def _jsonable_matrix(self, mat) -> list | None:
+        """Переводит матрицу в JSON-friendly list[list[float|None]]."""
+        if mat is None:
+            return None
+        try:
+            arr = np.asarray(mat, dtype=float)
+        except Exception:
+            return None
+        if arr.ndim != 2 or arr.size == 0:
+            return None
+        out: list[list] = []
+        for i in range(arr.shape[0]):
+            row = []
+            for j in range(arr.shape[1]):
+                v = float(arr[i, j])
+                row.append(v if np.isfinite(v) else None)
+            out.append(row)
+        return out
+
+    def _build_scan_payload(self, *, variant: str, anchor: str, cols: list, sc: dict) -> dict:
+        """Собирает компактный JSON payload для интерактивных сканов в HTML."""
+        payload: dict = {"variant": variant, "anchor": anchor, "labels": list(cols)}
+
+        pos = sc.get("window_pos") or {}
+        if isinstance(pos, dict) and (pos.get("curve") or pos.get("ticks")):
+            mats = {}
+            ticks = []
+            for t in (pos.get("ticks") or []):
+                tid = t.get("id")
+                if not tid:
+                    continue
+                ticks.append({"id": tid, "start": t.get("start"), "end": t.get("end"), "metric": t.get("metric")})
+                m = self._jsonable_matrix(t.get("matrix"))
+                if m is not None:
+                    mats[str(tid)] = m
+            payload["window_pos"] = {
+                "window_size": pos.get("window_size"),
+                "stride": pos.get("stride"),
+                "lag": pos.get("lag"),
+                "curve": pos.get("curve") or {},
+                "ticks": ticks,
+                "extremes": pos.get("extremes") or {},
+                "matrices": mats,
+            }
+
+        ws = sc.get("window_size") or {}
+        if isinstance(ws, dict) and (ws.get("curve") or ws.get("ticks")):
+            mats = {}
+            ticks = []
+            for t in (ws.get("ticks") or []):
+                tid = t.get("id")
+                if not tid:
+                    continue
+                ticks.append({
+                    "id": tid,
+                    "window_size": t.get("window_size"),
+                    "start": t.get("start"),
+                    "end": t.get("end"),
+                    "metric": t.get("metric"),
+                })
+                m = self._jsonable_matrix(t.get("matrix"))
+                if m is not None:
+                    mats[str(tid)] = m
+            payload["window_size"] = {
+                "lag": ws.get("lag"),
+                "curve": ws.get("curve") or {},
+                "ticks": ticks,
+                "extremes": ws.get("extremes") or {},
+                "matrices": mats,
+            }
+
+        lg = sc.get("lag") or {}
+        if isinstance(lg, dict) and (lg.get("curve") or lg.get("ticks")):
+            mats = {}
+            ticks = []
+            for t in (lg.get("ticks") or []):
+                tid = t.get("id")
+                if not tid:
+                    continue
+                ticks.append({"id": tid, "lag": t.get("lag"), "metric": t.get("metric")})
+                m = self._jsonable_matrix(t.get("matrix"))
+                if m is not None:
+                    mats[str(tid)] = m
+            payload["lag"] = {
+                "grid": lg.get("grid") or [],
+                "curve": lg.get("curve") or {},
+                "ticks": ticks,
+                "extremes": lg.get("extremes") or {},
+                "matrices": mats,
+            }
+
+        cube = sc.get("cube") or {}
+        if isinstance(cube, dict) and (cube.get("points") or cube.get("gallery")):
+            pts = []
+            mats = {}
+            for p in (cube.get("points") or []):
+                pid = p.get("id")
+                if not pid:
+                    continue
+                pts.append({
+                    "id": pid,
+                    "window_size": p.get("window_size"),
+                    "lag": p.get("lag"),
+                    "start": p.get("start"),
+                    "end": p.get("end"),
+                    "metric": p.get("metric"),
+                    "tag": p.get("tag"),
+                    "has_matrix": bool(p.get("matrix") is not None),
+                })
+                m = self._jsonable_matrix(p.get("matrix"))
+                if m is not None:
+                    mats[str(pid)] = m
+            gallery = []
+            for g in (cube.get("gallery") or []):
+                gid = g.get("id")
+                if not gid:
+                    continue
+                gallery.append({
+                    "id": gid,
+                    "window_size": g.get("window_size"),
+                    "lag": g.get("lag"),
+                    "start": g.get("start"),
+                    "end": g.get("end"),
+                    "metric": g.get("metric"),
+                    "tag": g.get("tag"),
+                })
+                m = self._jsonable_matrix(g.get("matrix"))
+                if m is not None:
+                    mats[str(gid)] = m
+            payload["cube"] = {
+                "matrix_mode": cube.get("matrix_mode"),
+                "matrix_limit": cube.get("matrix_limit"),
+                "eval_limit": cube.get("eval_limit"),
+                "combos": cube.get("combos") or [],
+                "window_sizes": cube.get("window_sizes") or [],
+                "lag_grid": cube.get("lag_grid") or [],
+                "points": pts,
+                "gallery": gallery,
+                "selectable_ids": cube.get("selectable_ids") or [],
+                "extremes": cube.get("extremes") or {},
+                "matrices": mats,
+            }
+        return payload
+
+    def _build_scans_interactive_html(self, payload: dict) -> str:
+        """HTML блок со сканами + JSON payload для JS (Plotly)."""
+        anchor = payload.get("anchor")
+        if not anchor:
+            return ""
+
+        blocks: list[str] = []
+        prefix = str(anchor)
+
+        def _scan_block(title: str, key: str) -> str:
+            return (
+                f"<div class='scanblock'>"
+                f"<h3>{html.escape(title)}</h3>"
+                f"<div class='grid2'>"
+                f"  <div><div class='scanplot' id='{prefix}_{key}_plot'></div></div>"
+                f"  <div>"
+                f"    <div class='scancontrols'>"
+                f"      <button class='btn' id='{prefix}_{key}_best'>best</button>"
+                f"      <button class='btn' id='{prefix}_{key}_median'>median</button>"
+                f"      <button class='btn' id='{prefix}_{key}_worst'>worst</button>"
+                f"      <select class='sel' id='{prefix}_{key}_sel'></select>"
+                f"    </div>"
+                f"    <div class='muted' id='{prefix}_{key}_meta'></div>"
+                f"    <div class='scanheat' id='{prefix}_{key}_heat'></div>"
+                f"  </div>"
+                f"</div>"
+                f"</div>"
+            )
+
+        if payload.get("window_pos"):
+            blocks.append(_scan_block("Window position scan", "pos"))
+        if payload.get("window_size"):
+            blocks.append(_scan_block("Window size scan", "wsize"))
+        if payload.get("lag"):
+            blocks.append(_scan_block("Lag scan", "lag"))
+        if payload.get("cube"):
+            blocks.append(
+                f"<div class='scanblock'>"
+                f"<h3>Cube scan (window_size × lag × position)</h3>"
+                f"<div class='grid2'>"
+                f"  <div><div class='scanplot' id='{prefix}_cube_plot'></div></div>"
+                f"  <div>"
+                f"    <div class='scancontrols'>"
+                f"      <button class='btn' id='{prefix}_cube_best'>best</button>"
+                f"      <button class='btn' id='{prefix}_cube_median'>median</button>"
+                f"      <button class='btn' id='{prefix}_cube_worst'>worst</button>"
+                f"      <select class='sel' id='{prefix}_cube_sel'></select>"
+                f"    </div>"
+                f"    <div class='muted' id='{prefix}_cube_meta'></div>"
+                f"    <div class='scanheat' id='{prefix}_cube_heat'></div>"
+                f"  </div>"
+                f"</div>"
+                f"</div>"
+            )
+        if not blocks:
+            return ""
+        js = json.dumps(payload, ensure_ascii=False).replace("</", "<\/")
+        return "".join(blocks) + f"<script type='application/json' id='scan_data_{prefix}'>{js}</script>"
 
     def _matrix_table(self, mat: np.ndarray, cols: list) -> str:
         if mat is None or not isinstance(mat, np.ndarray) or mat.size == 0:
@@ -380,74 +585,8 @@ class HTMLReportGenerator:
                     sm = (getattr(self.tool, "results_meta", {}) or {}).get(variant, {}) or {}
                     sc = sm.get("window_scans") or {}
                     if isinstance(sc, dict):
-                        blocks = []
-                        pos = sc.get("window_pos") or {}
-                        c = pos.get("curve") or {}
-                        if c.get("x"):
-                            b64 = self._plot_curve_b64(c.get("x", []), c.get("y", []), f"{variant}: quality vs window position", "start")
-                            blocks.append(
-                                "<div style='margin-top:10px'>"
-                                "<div class='muted'>Зависимость качества от положения окна (фикс. window_size)</div>"
-                                f"<img style='max-width:100%;border-radius:10px' src='data:image/png;base64,{b64}'/>"
-                                "</div>"
-                            )
-
-                        ws = sc.get("window_size") or {}
-                        c2 = (ws.get("curve") or {})
-                        if c2.get("x"):
-                            b64 = self._plot_curve_b64(c2.get("x", []), c2.get("y", []), f"{variant}: quality vs window size", "window_size")
-                            blocks.append(
-                                "<div style='margin-top:10px'>"
-                                "<div class='muted'>Зависимость качества от размера окна (best по позиции)</div>"
-                                f"<img style='max-width:100%;border-radius:10px' src='data:image/png;base64,{b64}'/>"
-                                "</div>"
-                            )
-
-                        lg = sc.get("lag") or {}
-                        c3 = (lg.get("curve") or {})
-                        if c3.get("x"):
-                            b64 = self._plot_curve_b64(c3.get("x", []), c3.get("y", []), f"{variant}: quality vs lag", "lag")
-                            blocks.append(
-                                "<div style='margin-top:10px'>"
-                                "<div class='muted'>Зависимость качества от лага (на полном ряде)</div>"
-                                f"<img style='max-width:100%;border-radius:10px' src='data:image/png;base64,{b64}'/>"
-                                "</div>"
-                            )
-
-                        cube_scan = sc.get("cube") or {}
-                        pts = cube_scan.get("points") if isinstance(cube_scan, dict) else None
-                        if pts:
-                            b64 = self._plot_cube3d_b64(list(pts), f"{variant}: window×lag×position")
-                            blocks.append(
-                                "<div style='margin-top:10px'>"
-                                "<div class='muted'>3D: window_size × lag × position (точки)</div>"
-                                f"<img style='max-width:100%;border-radius:10px' src='data:image/png;base64,{b64}'/>"
-                                "</div>"
-                            )
-
-                        # Матрицы для выбранных точек куба (best/median/worst + доп. выборка).
-                        gal = cube_scan.get("gallery") if isinstance(cube_scan, dict) else None
-                        if gal:
-                            car = []
-                            for g in gal:
-                                matg = g.get("matrix")
-                                try:
-                                    q = float(g.get("metric"))
-                                    lbl = f"w={g.get('window_size')} lag={g.get('lag')} start={g.get('start')} q={q:.4g}"
-                                except Exception:
-                                    lbl = f"w={g.get('window_size')} lag={g.get('lag')} start={g.get('start')}"
-                                b64m = self._b64_png(plots.plot_heatmap(matg, f"{variant} heat", labels=cols))
-                                car.append((lbl, b64m))
-                            if car:
-                                blocks.append(
-                                    "<div style='margin-top:10px'>"
-                                    "<div class='muted'>Матрицы для точек куба (best/median/worst + выборка)</div>"
-                                    + self._carousel(car, f"cube_g_{k}")
-                                    + "</div>"
-                                )
-
-                        if blocks:
-                            scans_html = "".join(blocks)
+                        payload = self._build_scan_payload(variant=variant, anchor=anchor, cols=cols, sc=sc)
+                        scans_html = self._build_scans_interactive_html(payload)
                 except Exception:
                     scans_html = ""
 
@@ -462,6 +601,61 @@ class HTMLReportGenerator:
                 f"{table_html}"
                 f"</section>"
             )
+
+        scan_js = """<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script>
+function showSlide(cid, idx){
+  const slides = document.querySelectorAll('[id^="'+cid+'_s"]');
+  slides.forEach((el,i)=>{ el.style.display = (i===idx?'block':'none'); });
+}
+function _fmt(v){ return (v===null || v===undefined || Number.isNaN(Number(v))) ? '—' : Number(v).toFixed(4); }
+function _renderHeat(id, labels, z){
+  if(!window.Plotly){ return; }
+  const d = document.getElementById(id); if(!d){ return; }
+  Plotly.newPlot(d, [{type:'heatmap', z:z||[], x:labels||[], y:labels||[], colorscale:'RdBu'}], {margin:{t:10,r:10,b:40,l:40}});
+}
+function _renderLine(id, xs, ys, xTitle){
+  if(!window.Plotly){ return; }
+  const d = document.getElementById(id); if(!d){ return; }
+  Plotly.newPlot(d, [{type:'scatter', mode:'lines+markers', x:xs||[], y:ys||[]}], {margin:{t:10,r:10,b:40,l:45}, xaxis:{title:xTitle}, yaxis:{title:'metric'}});
+}
+function _init1D(prefix, key, data, labels){
+  const plotId = `${prefix}_${key}_plot`, heatId = `${prefix}_${key}_heat`, selId = `${prefix}_${key}_sel`, metaId = `${prefix}_${key}_meta`;
+  _renderLine(plotId, (data.curve||{}).x||[], (data.curve||{}).y||[], key);
+  const ticks = data.ticks||[]; const mats = data.matrices||{}; const ext = data.extremes||{};
+  const sel = document.getElementById(selId); if(!sel){ return; }
+  sel.innerHTML = ticks.map((t,i)=>`<option value="${t.id}">#${i} ${t.id}</option>`).join('');
+  const show = (id)=>{ const t=(ticks.find(x=>x.id===id)||{}); _renderHeat(heatId, labels, mats[id]); const m=document.getElementById(metaId); if(m){ m.textContent = JSON.stringify(t); } if(sel.value!==id){ sel.value=id; } };
+  sel.onchange = ()=>show(sel.value);
+  ['best','median','worst'].forEach(tag=>{ const b=document.getElementById(`${prefix}_${key}_${tag}`); if(b){ b.onclick=()=>{ if(ext[tag]) show(ext[tag]); }; }});
+  const first = ext.best || (ticks[0]||{}).id; if(first){ show(first); }
+}
+function _initCube(prefix, data, labels){
+  if(!window.Plotly){ return; }
+  const pts = data.points||[], mats=data.matrices||{}, ext=data.extremes||{};
+  const plot = document.getElementById(`${prefix}_cube_plot`), sel=document.getElementById(`${prefix}_cube_sel`), meta=document.getElementById(`${prefix}_cube_meta`);
+  if(!plot || !sel){ return; }
+  Plotly.newPlot(plot, [{type:'scatter3d', mode:'markers', x:pts.map(p=>p.window_size), y:pts.map(p=>p.lag), z:pts.map(p=>p.start), text:pts.map(p=>`${p.id} q=${_fmt(p.metric)} ${p.tag||''}`), marker:{size:4,color:pts.map(p=>p.metric),colorscale:'Viridis'}}], {margin:{t:10,r:10,b:10,l:10}, scene:{xaxis:{title:'window'},yaxis:{title:'lag'},zaxis:{title:'start'}}});
+  sel.innerHTML = pts.map((p,i)=>`<option value="${p.id}">#${i} ${p.id}</option>`).join('');
+  const show=(id)=>{ _renderHeat(`${prefix}_cube_heat`, labels, mats[id]); const p=pts.find(x=>x.id===id)||{}; if(meta){ meta.textContent = JSON.stringify(p); } if(sel.value!==id){ sel.value=id; } };
+  sel.onchange = ()=>show(sel.value);
+  plot.on('plotly_click', (ev)=>{ const p=(ev.points||[])[0]; if(p){ const id=pts[p.pointIndex] && pts[p.pointIndex].id; if(id){ show(id); } }});
+  ['best','median','worst'].forEach(tag=>{ const b=document.getElementById(`${prefix}_cube_${tag}`); if(b){ b.onclick=()=>{ if(ext[tag]) show(ext[tag]); }; }});
+  const first = ext.best || (pts[0]||{}).id; if(first){ show(first); }
+}
+function _initScans(){
+  document.querySelectorAll('script[id^="scan_data_"]').forEach((el)=>{
+    try{
+      const payload = JSON.parse(el.textContent||'{}'); const prefix=payload.anchor; const labels=payload.labels||[];
+      if(payload.window_pos){ _init1D(prefix, 'pos', payload.window_pos, labels); }
+      if(payload.window_size){ _init1D(prefix, 'wsize', payload.window_size, labels); }
+      if(payload.lag){ _init1D(prefix, 'lag', payload.lag, labels); }
+      if(payload.cube){ _initCube(prefix, payload.cube, labels); }
+    }catch(e){ console.warn('scan init failed', e); }
+  });
+}
+document.addEventListener('DOMContentLoaded', _initScans);
+</script>"""
 
         html_content = f"""<!doctype html>
 <html lang="ru">
@@ -491,12 +685,7 @@ table.matrix th{{background:#f9f9f9; text-align:center;}}
 .grid2{{display:grid; grid-template-columns:1fr 1fr; gap:12px;}}
 .mono{{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px;}}
 </style>
-<script>
-function showSlide(cid, idx){{
-  const slides = document.querySelectorAll('[id^="'+cid+'_s"]');
-  slides.forEach((el,i)=>{{ el.style.display = (i===idx?'block':'none'); }});
-}}
-</script>
+{scan_js}
 </head>
 <body>
 <header>
