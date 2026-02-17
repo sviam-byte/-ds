@@ -294,6 +294,8 @@ class HTMLReportGenerator:
         include_matrix_tables = kwargs.get("include_matrix_tables", True)
         include_fft_plots = bool(kwargs.get("include_fft_plots", False))
         include_scans = bool(kwargs.get("include_scans", True))
+        include_series_files = bool(kwargs.get("include_series_files", True))
+        series_preview_rows = int(kwargs.get("series_preview_rows", 200))
         harmonic_top_k = int(kwargs.get("harmonic_top_k", 5))
         graph_threshold = kwargs.get("graph_threshold", 0.2)
         p_alpha = kwargs.get("p_alpha", 0.05)
@@ -326,6 +328,41 @@ class HTMLReportGenerator:
                     y_domain = (float(np.nanmin(vals)), float(np.nanmax(vals)))
             except Exception:
                 y_domain = None
+
+            # Файлы рядов рядом с отчётом (удобно открыть/переиспользовать).
+            series_files_html = ""
+            try:
+                if include_series_files:
+                    out_dir = Path(output_path).parent
+                    base = Path(output_path).stem
+                    series_xlsx = out_dir / f"{base}_series.xlsx"
+                    series_csv = out_dir / f"{base}_series.csv"
+
+                    # Единый файл (xlsx) со слоями: RAW/PREPROCESSED/AFTER_AUTODIFF/(NORMALIZED)
+                    try:
+                        self.tool.export_series_bundle(str(series_xlsx))
+                    except Exception:
+                        raw_df.to_excel(series_xlsx, index=False)
+
+                    # Плоский CSV (RAW)
+                    try:
+                        raw_df.to_csv(series_csv, index=False)
+                    except Exception:
+                        pass
+
+                    links = []
+                    try:
+                        if series_xlsx.exists():
+                            links.append(f"<a href='{html.escape(series_xlsx.name)}' download>{html.escape(series_xlsx.name)}</a>")
+                        if series_csv.exists():
+                            links.append(f"<a href='{html.escape(series_csv.name)}' download>{html.escape(series_csv.name)}</a>")
+                    except Exception:
+                        links = []
+
+                    if links:
+                        series_files_html = "<div class='meta'><b>Ряды (файлы):</b> " + " • ".join(links) + "</div>"
+            except Exception:
+                series_files_html = ""
 
             b64_raw = self._b64_png(plots.plot_timeseries_panel(raw_df, "Ряды: RAW (общий масштаб Y)", y_domain=y_domain))
             b64_proc = self._b64_png(plots.plot_timeseries_panel(proc_df, "Ряды: после предобработки/auto-diff (общий масштаб Y)", y_domain=y_domain))
@@ -376,16 +413,48 @@ class HTMLReportGenerator:
                 )
 
             toc.insert(0, "<li><a href='#main'>Главный экран</a></li>")
+
+            # Ряды по умолчанию скрыты: раскрываются по клику.
+            preview_n = 0
+            try:
+                preview_n = min(int(series_preview_rows), int(raw_df.shape[0]))
+            except Exception:
+                preview_n = 0
+
+            raw_preview_html = ""
+            try:
+                if preview_n > 0:
+                    raw_preview_html = raw_df.head(preview_n).to_html(index=False, border=0)
+            except Exception:
+                raw_preview_html = ""
+
+            series_details = (
+                "<details><summary><b>Показать ряды (графики)</b></summary>"
+                "<div class='grid2'>"
+                f"<div><img src='data:image/png;base64,{b64_raw}'/></div>"
+                f"<div><img src='data:image/png;base64,{b64_proc}'/></div>"
+                "</div>"
+                "</details>"
+            )
+
+            table_details = ""
+            if raw_preview_html:
+                table_details = (
+                    "<details><summary><b>Показать таблицу рядов (preview)</b></summary>"
+                    f"<div class='meta'>Показаны первые {preview_n} строк. Полные ряды — в файлах выше.</div>"
+                    f"<div class='scroll'>{raw_preview_html}</div>"
+                    "</details>"
+                )
+
             sections.insert(
                 0,
                 "<section class='card' id='main'>"
                 "<h1>Главный экран</h1>"
                 "<div class='muted'>RAW/после предобработки в одном масштабе Y • применённая предобработка • гармоники</div>"
+                f"{series_files_html}"
                 f"{prep_html}"
-                "<div class='grid2'>"
-                f"<div><img src='data:image/png;base64,{b64_raw}'/></div>"
-                f"<div><img src='data:image/png;base64,{b64_proc}'/></div>"
-                "</div>"
+                f"{series_details}"
+                f"{table_details}"
                 + "".join(harm_cards[:8])
                 + "</section>"
             )
@@ -683,6 +752,9 @@ table.matrix th{{background:#f9f9f9; text-align:center;}}
 .grid{{display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:8px; margin-top:10px;}}
 .meta{{margin-top:8px; padding:8px 10px; border:1px dashed #ddd; border-radius:10px; font-size:12px; color:#444; background:#fcfcfc;}}
 .grid2{{display:grid; grid-template-columns:1fr 1fr; gap:12px;}}
+.scroll{{max-height:420px; overflow:auto; border:1px solid #ddd; border-radius:10px; padding:8px; background:#fff;}}
+.scroll table{{width:100%; border-collapse:collapse; font-size:12px;}}
+.scroll th, .scroll td{{border-bottom:1px solid #eee; padding:4px 6px; text-align:left;}}
 .mono{{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px;}}
 </style>
 {scan_js}
