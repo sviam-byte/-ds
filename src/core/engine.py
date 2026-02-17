@@ -2608,6 +2608,34 @@ class BigMasterTool:
         """Генерация Excel отчета через внешний класс."""
         return ExcelReportWriter(self).write(save_path, **kwargs)
 
+    def export_series_bundle(self, save_path: str) -> str:
+        """Сохраняет сами ряды (RAW/после предобработки/после auto-diff/normalized) единым файлом.
+
+        Это отдельный файл, который удобно держать рядом с отчётами (HTML/Excel).
+        """
+        import pandas as pd
+
+        def _pick(df):
+            try:
+                return df if df is not None and not getattr(df, 'empty', True) else None
+            except Exception:
+                return None
+
+        raw_df = _pick(getattr(self, 'data_raw', None)) or _pick(getattr(self, 'data', None)) or pd.DataFrame()
+        pre_df = _pick(getattr(self, 'data_preprocessed', None)) or _pick(getattr(self, 'data', None)) or pd.DataFrame()
+        ad_df = _pick(getattr(self, 'data_after_autodiff', None)) or _pick(getattr(self, 'data', None)) or pd.DataFrame()
+        norm_df = _pick(getattr(self, 'data_normalized', None)) or pd.DataFrame()
+
+        with pd.ExcelWriter(save_path, engine='openpyxl') as writer:
+            raw_df.to_excel(writer, sheet_name='RAW', index=False)
+            pre_df.to_excel(writer, sheet_name='PREPROCESSED', index=False)
+            ad_df.to_excel(writer, sheet_name='AFTER_AUTODIFF', index=False)
+            if not norm_df.empty:
+                norm_df.to_excel(writer, sheet_name='NORMALIZED', index=False)
+
+        logging.info('[Series] Сохранены ряды: %s', save_path)
+        return save_path
+
     def test_stationarity(self, series: pd.Series) -> Tuple[Optional[float], Optional[float]]:
         """Проверяет стационарность ряда через ADF-тест."""
         return analysis_stats.test_stationarity(series)

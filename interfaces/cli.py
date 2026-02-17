@@ -172,6 +172,13 @@ def _process_single_file(filepath: str, args: argparse.Namespace, out_dir: str) 
     excel_path = args.output or os.path.join(out_dir, f"{name}_full.xlsx")
     html_path = args.report_html or os.path.join(out_dir, f"{name}_report.html")
 
+    # Всегда сохраняем сами ряды отдельным файлом рядом с отчётами
+    series_path = os.path.join(out_dir, f"{name}_series.xlsx")
+    try:
+        tool.export_series_bundle(series_path)
+    except Exception:
+        pass
+
     if do_excel:
         tool.export_big_excel(excel_path, threshold=args.graph_threshold, p_value_alpha=args.p_alpha)
 
@@ -185,6 +192,7 @@ def _process_single_file(filepath: str, args: argparse.Namespace, out_dir: str) 
             include_matrix_tables=(spec.include_matrix_tables if spec else True),
             include_fft_plots=(spec.include_fft_plots if spec else False),
             harmonic_top_k=(spec.harmonic_top_k if spec else 5),
+            include_series_files=True,
         )
 
     print(f"Processed: {filepath}")
