@@ -153,6 +153,12 @@ class HTMLReportGenerator:
                 pid = p.get("id")
                 if not pid:
                     continue
+                valid_flag = p.get("valid", None)
+                if valid_flag is None:
+                    try:
+                        valid_flag = bool(np.isfinite(float(p.get("metric", float("nan")))))
+                    except Exception:
+                        valid_flag = False
                 pts.append({
                     "id": pid,
                     "window_size": p.get("window_size"),
@@ -162,6 +168,7 @@ class HTMLReportGenerator:
                     "metric": p.get("metric"),
                     "tag": p.get("tag"),
                     "has_matrix": bool(p.get("matrix") is not None),
+                    "valid": bool(valid_flag),
                 })
                 m = self._jsonable_matrix(p.get("matrix"))
                 if m is not None:
@@ -701,16 +708,61 @@ function _init1D(prefix, key, data, labels){
 }
 function _initCube(prefix, data, labels){
   if(!window.Plotly){ return; }
-  const pts = data.points||[], mats=data.matrices||{}, ext=data.extremes||{};
+  const pts = data.points||[], mats=data.matrices||{}, ext=data.extremes||{}, selectable=(data.selectable_ids||[]);
   const plot = document.getElementById(`${prefix}_cube_plot`), sel=document.getElementById(`${prefix}_cube_sel`), meta=document.getElementById(`${prefix}_cube_meta`);
   if(!plot || !sel){ return; }
-  Plotly.newPlot(plot, [{type:'scatter3d', mode:'markers', x:pts.map(p=>p.window_size), y:pts.map(p=>p.lag), z:pts.map(p=>p.start), text:pts.map(p=>`${p.id} q=${_fmt(p.metric)} ${p.tag||''}`), marker:{size:4,color:pts.map(p=>p.metric),colorscale:'Viridis'}}], {margin:{t:10,r:10,b:10,l:10}, scene:{xaxis:{title:'window'},yaxis:{title:'lag'},zaxis:{title:'start'}}});
-  sel.innerHTML = pts.map((p,i)=>`<option value="${p.id}">#${i} ${p.id}</option>`).join('');
-  const show=(id)=>{ _renderHeat(`${prefix}_cube_heat`, labels, mats[id]); const p=pts.find(x=>x.id===id)||{}; if(meta){ meta.textContent = JSON.stringify(p); } if(sel.value!==id){ sel.value=id; } };
+
+  const valid = pts.filter(p=>p && p.valid && Number.isFinite(Number(p.metric)));
+  const invalid = pts.filter(p=>!p || !(p.valid && Number.isFinite(Number(p.metric))));
+
+  const traceValid = {
+    type:'scatter3d', mode:'markers',
+    x: valid.map(p=>p.window_size), y: valid.map(p=>p.lag), z: valid.map(p=>p.start),
+    text: valid.map(p=>`${p.id} q=${_fmt(p.metric)} ${p.tag||''}`),
+    customdata: valid.map(p=>({id:p.id, has_matrix:!!p.has_matrix})),
+    marker:{size:4, color: valid.map(p=>p.metric), colorscale:'Viridis'}
+  };
+
+  const traceInvalid = {
+    type:'scatter3d', mode:'markers',
+    x: invalid.map(p=>p.window_size), y: invalid.map(p=>p.lag), z: invalid.map(p=>p.start),
+    text: invalid.map(p=>`${p.id} q=— (не рассчитано)`),
+    customdata: invalid.map(p=>({id:p.id, has_matrix:!!p.has_matrix})),
+    marker:{size:3, color:'rgba(150,150,150,0.65)'}
+  };
+
+  Plotly.newPlot(plot, [traceValid, traceInvalid], {
+    margin:{t:10,r:10,b:10,l:10},
+    scene:{xaxis:{title:'window'},yaxis:{title:'lag'},zaxis:{title:'start'}}
+  });
+
+  const ids = (selectable && selectable.length) ? selectable : pts.filter(p=>p && p.has_matrix).map(p=>p.id);
+  sel.innerHTML = ids.map((id,i)=>`<option value="${id}">#${i} ${id}</option>`).join('');
+
+  const show=(id)=>{
+    const p = pts.find(x=>x.id===id)||{};
+    if(meta){ meta.textContent = JSON.stringify(p); }
+    if(mats[id]){ _renderHeat(`${prefix}_cube_heat`, labels, mats[id]); }
+    else{ _renderHeat(`${prefix}_cube_heat`, labels, []); }
+    if(sel.value!==id){ sel.value=id; }
+  };
+
   sel.onchange = ()=>show(sel.value);
-  plot.on('plotly_click', (ev)=>{ const p=(ev.points||[])[0]; if(p){ const id=pts[p.pointIndex] && pts[p.pointIndex].id; if(id){ show(id); } }});
-  ['best','median','worst'].forEach(tag=>{ const b=document.getElementById(`${prefix}_cube_${tag}`); if(b){ b.onclick=()=>{ if(ext[tag]) show(ext[tag]); }; }});
-  const first = ext.best || (pts[0]||{}).id; if(first){ show(first); }
+
+  plot.on('plotly_click', (ev)=>{
+    const p=(ev.points||[])[0];
+    if(!p || !p.customdata){ return; }
+    const id = p.customdata.id;
+    if(id){ show(id); }
+  });
+
+  ['best','median','worst'].forEach(tag=>{
+    const b=document.getElementById(`${prefix}_cube_${tag}`);
+    if(b){ b.onclick=()=>{ if(ext[tag]) show(ext[tag]); }; }
+  });
+
+  const first = ext.best || (ids[0]||null) || (pts[0]||{}).id;
+  if(first){ show(first); }
 }
 function _initScans(){
   document.querySelectorAll('script[id^="scan_data_"]').forEach((el)=>{

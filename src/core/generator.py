@@ -1,22 +1,27 @@
-"""Модуль генерации синтетических временных рядов для тестирования.
+"""
+Модуль генерации синтетических временных рядов для тестирования.
 
-Здесь есть два слоя:
-1) готовые пресеты (coupled_system, random_walks)
-2) генератор по формулам (x(t), y(t,x), z(t,x,y), ...)
+Цель: быстро собирать синтетические датасеты, где:
+- каждая переменная может быть шумом/моделью/функцией времени;
+- каждая переменная может зависеть от других (через лаг >= 1);
+- всё детерминируемо по seed.
 
-Формулы вычисляются через безопасный парсер (AST) с белым списком функций.
+Дополнительно сохранён старый API формульного генератора для обратной совместимости.
 """
 
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Mapping
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional
 
 import numpy as np
 import pandas as pd
 
 
+# ----------------------------
+# Пресеты (обратная совместимость)
+# ----------------------------
 def generate_coupled_system(
     n_samples: int = 500,
     coupling_strength: float = 0.8,
@@ -24,19 +29,19 @@ def generate_coupled_system(
 ) -> pd.DataFrame:
     """Генерирует систему из 4 переменных:
 
-    - X: авторегрессионный процесс (источник).
+    - X: AR(1) (источник).
     - Y: зависит от X (X -> Y) с лагом 1.
-    - Z: независимый шум (random walk).
-    - S: сезонный компонент (синус).
+    - Z: независимый random walk.
+    - S: сезонный синус.
     """
-    np.random.seed(42)
+    rng = np.random.default_rng(42)
 
-    e_x = np.random.normal(0, 1, n_samples)
-    e_y = np.random.normal(0, 1, n_samples)
-    e_z = np.random.normal(0, 1, n_samples)
+    e_x = rng.normal(0, 1, n_samples)
+    e_y = rng.normal(0, 1, n_samples)
+    e_z = rng.normal(0, 1, n_samples)
 
-    x = np.zeros(n_samples)
-    y = np.zeros(n_samples)
+    x = np.zeros(n_samples, dtype=float)
+    y = np.zeros(n_samples, dtype=float)
 
     for t in range(1, n_samples):
         x[t] = 0.5 * x[t - 1] + noise_level * e_x[t]
@@ -44,8 +49,8 @@ def generate_coupled_system(
 
     z = np.cumsum(e_z * noise_level)
 
-    t_idx = np.arange(n_samples)
-    s = np.sin(2 * np.pi * t_idx / 50) + np.random.normal(0, 0.1, n_samples)
+    t_idx = np.arange(n_samples, dtype=float)
+    s = np.sin(2 * np.pi * t_idx / 50.0) + rng.normal(0, 0.1, n_samples)
 
     df = pd.DataFrame(
         {
@@ -55,21 +60,185 @@ def generate_coupled_system(
             "Season (S)": s,
         }
     )
-
     return df.iloc[50:].reset_index(drop=True)
 
 
 def generate_random_walks(n_vars: int = 5, n_samples: int = 500) -> pd.DataFrame:
     """Генерирует N случайных блужданий (часто дают ложные корреляции)."""
-    np.random.seed(None)
-    data = {}
-    for i in range(n_vars):
-        data[f"RW_{i + 1}"] = np.cumsum(np.random.normal(0, 1, n_samples))
+    rng = np.random.default_rng()
+    data: Dict[str, np.ndarray] = {}
+    for i in range(int(max(1, n_vars))):
+        data[f"RW_{i + 1}"] = np.cumsum(rng.normal(0, 1, n_samples))
     return pd.DataFrame(data)
 
 
+# ----------------------------
+# Конструктор синтетики (новый API)
+# ----------------------------
+BaseType = Literal["white", "ar1", "rw", "sin", "cos", "linear", "const"]
+
+
+@dataclass(slots=True)
+class CouplingTerm:
+    """Линейная зависимость от другой переменной с лагом >= 1: coef * src[t-lag]."""
+
+    src: str
+    coef: float
+    lag: int = 1
+
+
+@dataclass(slots=True)
+class SeriesSpec:
+    """Спецификация одной переменной для генерации."""
+
+    name: str
+    base: BaseType = "white"
+    params: Dict[str, float] = field(default_factory=dict)
+    noise: float = 0.0
+    couplings: List[CouplingTerm] = field(default_factory=list)
+
+
+def _safe_float(x: Any, default: float = 0.0) -> float:
+    try:
+        v = float(x)
+        return v if np.isfinite(v) else float(default)
+    except Exception:
+        return float(default)
+
+
+def generate_synthetic_dataset(
+    specs: List[SeriesSpec],
+    *,
+    n_samples: int = 800,
+    dt: float = 1.0,
+    seed: Optional[int] = 42,
+) -> pd.DataFrame:
+    """Генерация мультивариантного датасета по списку ``SeriesSpec``."""
+    n = int(max(10, n_samples))
+    dt = float(dt) if dt is not None else 1.0
+    if not np.isfinite(dt) or dt <= 0:
+        dt = 1.0
+
+    rng = np.random.default_rng(seed)
+
+    names = [s.name for s in specs]
+    out: Dict[str, np.ndarray] = {nm: np.zeros(n, dtype=float) for nm in names}
+    t = np.arange(n, dtype=float) * dt
+
+    for i in range(n):
+        for s in specs:
+            prev = out[s.name][i - 1] if i > 0 else 0.0
+            base = 0.0
+            p = s.params or {}
+
+            if s.base == "white":
+                base = rng.normal(0.0, _safe_float(p.get("scale", 1.0), 1.0))
+            elif s.base == "ar1":
+                phi = _safe_float(p.get("phi", 0.5), 0.5)
+                sc = _safe_float(p.get("scale", 1.0), 1.0)
+                base = phi * prev + rng.normal(0.0, sc)
+            elif s.base == "rw":
+                sc = _safe_float(p.get("scale", 1.0), 1.0)
+                base = prev + rng.normal(0.0, sc)
+            elif s.base in {"sin", "cos"}:
+                amp = _safe_float(p.get("amp", 1.0), 1.0)
+                per = _safe_float(p.get("period", 50.0), 50.0)
+                if per <= 0:
+                    per = 50.0
+                ph = _safe_float(p.get("phase", 0.0), 0.0)
+                bn = _safe_float(p.get("base_noise", 0.0), 0.0)
+                arg = 2.0 * np.pi * (t[i] / per) + ph
+                wave = np.sin(arg) if s.base == "sin" else np.cos(arg)
+                base = amp * wave + (rng.normal(0.0, bn) if bn > 0 else 0.0)
+            elif s.base == "linear":
+                slope = _safe_float(p.get("slope", 0.0), 0.0)
+                intercept = _safe_float(p.get("intercept", 0.0), 0.0)
+                bn = _safe_float(p.get("base_noise", 0.0), 0.0)
+                base = intercept + slope * t[i] + (rng.normal(0.0, bn) if bn > 0 else 0.0)
+            elif s.base == "const":
+                val = _safe_float(p.get("value", 0.0), 0.0)
+                bn = _safe_float(p.get("base_noise", 0.0), 0.0)
+                base = val + (rng.normal(0.0, bn) if bn > 0 else 0.0)
+
+            coupling_sum = 0.0
+            for c in (s.couplings or []):
+                lag = int(max(1, c.lag))
+                if i - lag < 0:
+                    continue
+                src = str(c.src)
+                if src not in out:
+                    continue
+                coupling_sum += float(c.coef) * float(out[src][i - lag])
+
+            extra = rng.normal(0.0, float(s.noise)) if (s.noise is not None and float(s.noise) > 0) else 0.0
+            out[s.name][i] = float(base + coupling_sum + extra)
+
+    return pd.DataFrame(out)
+
+
+def build_specs_from_dict(builder: Dict) -> List[SeriesSpec]:
+    """Преобразует словарь builder в список ``SeriesSpec``."""
+    specs: List[SeriesSpec] = []
+    series_list = builder.get("series") if isinstance(builder, dict) else None
+    if not isinstance(series_list, list):
+        raise ValueError("builder['series'] must be a list")
+
+    for item in series_list:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        base = str(item.get("base", "white"))
+        if base not in {"white", "ar1", "rw", "sin", "cos", "linear", "const"}:
+            base = "white"
+        params = item.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+        noise = _safe_float(item.get("noise", 0.0), 0.0)
+
+        couplings: List[CouplingTerm] = []
+        for c in (item.get("couplings") or []):
+            if not isinstance(c, dict):
+                continue
+            src = str(c.get("src", "")).strip()
+            if not src:
+                continue
+            coef = _safe_float(c.get("coef", 0.0), 0.0)
+            lag = int(max(1, int(_safe_float(c.get("lag", 1), 1))))
+            if coef == 0.0:
+                continue
+            couplings.append(CouplingTerm(src=src, coef=coef, lag=lag))
+
+        specs.append(
+            SeriesSpec(
+                name=name,
+                base=base,
+                params={k: _safe_float(v, 0.0) for k, v in params.items()},
+                noise=noise,
+                couplings=couplings,
+            )
+        )
+
+    if len(specs) < 1:
+        raise ValueError("no valid series specs in builder")
+    return specs
+
+
+def generate_from_builder(
+    builder: Dict,
+    *,
+    n_samples: int = 800,
+    dt: float = 1.0,
+    seed: Optional[int] = 42,
+) -> pd.DataFrame:
+    """High-level API: ``builder(dict) -> DataFrame``."""
+    specs = build_specs_from_dict(builder)
+    return generate_synthetic_dataset(specs, n_samples=n_samples, dt=dt, seed=seed)
+
+
 # =========================
-# Генерация по формулам
+# Генерация по формулам (legacy API)
 # =========================
 
 
@@ -104,7 +273,6 @@ def _validate_ast(node: ast.AST, allowed_names: set[str], allowed_funcs: set[str
                 raise UnsafeFormulaError(f"Запрещённый унарный оператор: {type(n.op).__name__}")
             continue
         if isinstance(n, ast.Call):
-            # Разрешаем только func(...) где func — имя из белого списка.
             if isinstance(n.func, ast.Name):
                 fn = n.func.id
                 if fn not in allowed_funcs:
@@ -121,16 +289,12 @@ def _validate_ast(node: ast.AST, allowed_names: set[str], allowed_funcs: set[str
                 continue
             raise UnsafeFormulaError("Разрешены только числовые константы")
         if isinstance(n, ast.Tuple):
-            # полезно для where(cond, a, b) не нужно; но оставляем для совместимости
             continue
         if isinstance(n, ast.keyword):
-            # Разрешаем только именованные аргументы вида f(arg=...).
-            # f(**payload) даёт n.arg is None и блокируется как потенциально опасный путь.
             if n.arg is None:
                 raise UnsafeFormulaError("Распаковка **kwargs в вызовах запрещена")
             continue
 
-        # Явно запрещаем всё остальное: Attribute, Subscript, Compare, BoolOp, IfExp, Comprehension, etc.
         if isinstance(
             n,
             (
@@ -167,14 +331,8 @@ def _validate_ast(node: ast.AST, allowed_names: set[str], allowed_funcs: set[str
         ):
             raise UnsafeFormulaError(f"Запрещённая конструкция: {type(n).__name__}")
 
-        # Прочие узлы (Load/Store и пр.) игнорируем.
 
-
-def _make_eval_env(
-    *,
-    n: int,
-    rng: np.random.Generator,
-) -> Dict[str, Any]:
+def _make_eval_env(*, n: int, rng: np.random.Generator) -> Dict[str, Any]:
     """Окружение функций для формул."""
 
     def randn(scale: float = 1.0) -> np.ndarray:
@@ -194,8 +352,7 @@ def _make_eval_env(
             x[i] = p * x[i - 1] + e[i]
         return x
 
-    # numpy ufuncs
-    env: Dict[str, Any] = {
+    return {
         "pi": float(np.pi),
         "e": float(np.e),
         "sin": np.sin,
@@ -214,7 +371,6 @@ def _make_eval_env(
         "rw": rw,
         "ar1": ar1,
     }
-    return env
 
 
 def safe_eval_vector(expr: str, *, env: Mapping[str, Any], names: Mapping[str, Any]) -> np.ndarray:
@@ -223,7 +379,6 @@ def safe_eval_vector(expr: str, *, env: Mapping[str, Any], names: Mapping[str, A
     if not expr:
         raise ValueError("Пустая формула")
 
-    # Разрешаем имена (t, x, y, z, ... + константы) и функции из env.
     allowed_funcs = {k for k, v in env.items() if callable(v)}
     allowed_names = set(names.keys()) | {k for k, v in env.items() if not callable(v)}
 
@@ -239,10 +394,8 @@ def safe_eval_vector(expr: str, *, env: Mapping[str, Any], names: Mapping[str, A
 
     arr = np.asarray(out, dtype=float)
     if arr.shape == ():
-        # скаляр -> растягиваем до длины временной оси.
         arr = np.full((int(len(names["t"])),), float(arr), dtype=float)
 
-    # В отчёты ожидается ровно один временной ряд на формулу.
     if arr.ndim != 1:
         raise ValueError(f"Формула должна возвращать 1D-массив, получено ndim={arr.ndim}")
 
@@ -258,51 +411,25 @@ def generate_formula_dataset(
     seed: int | None = 42,
     specs: Iterable[FormulaSpec] | None = None,
 ) -> pd.DataFrame:
-    """Генерирует датасет по формулам.
-
-    Семантика зависимостей:
-    - первый ряд может использовать только t
-    - следующий может использовать t и ранее вычисленные ряды (x, y, ...)
-
-    Пример:
-      X: sin(2*pi*t/50) + 0.2*randn()
-      Y: 0.8*X + 0.3*randn()
-      Z: rw(0.5)
-
-    Переменные в формулах:
-      t — массив времени длины N
-      X, Y, Z ... — ранее вычисленные ряды (регистр важен: используйте имена рядов)
-
-    Разрешённые функции:
-      sin, cos, tan, exp, log, sqrt, abs, clip, where, minimum, maximum,
-      randn(scale=1), randu(scale=1), rw(scale=1), ar1(phi=0.7, scale=1)
-    """
-
-    if specs is None:
-        specs = [
-            FormulaSpec("X", "sin(2*pi*t/50) + 0.2*randn()"),
-            FormulaSpec("Y", "0.8*X + 0.3*randn()"),
-            FormulaSpec("Z", "rw(0.5)"),
-        ]
-
-    n = int(n_samples)
-    if n < 5:
-        raise ValueError("n_samples должно быть >= 5")
-
+    """Генератор датасета по формулам (legacy API)."""
+    n = int(max(1, n_samples))
     t = np.arange(n, dtype=float) * float(dt)
     rng = np.random.default_rng(seed)
+
+    specs = list(specs or [FormulaSpec("X", "randn()"), FormulaSpec("Y", "randn()"), FormulaSpec("Z", "randn()")])
+    if len(specs) == 0:
+        raise ValueError("Не задано ни одной формулы")
+
     env = _make_eval_env(n=n, rng=rng)
+    cols: Dict[str, np.ndarray] = {}
 
-    names: Dict[str, Any] = {"t": t}
-    out: Dict[str, np.ndarray] = {}
+    for idx, spec in enumerate(specs):
+        name = (spec.name or "").strip() or f"V{idx+1}"
+        names: Dict[str, Any] = {"t": t}
+        for prev_name, prev_values in cols.items():
+            names[prev_name] = prev_values
+            names[prev_name.lower()] = prev_values
+        arr = safe_eval_vector(spec.expr, env=env, names=names)
+        cols[name] = arr
 
-    for spec in specs:
-        if not spec.name or not spec.expr:
-            continue
-        vec = safe_eval_vector(spec.expr, env=env, names={**names, **out})
-        out[str(spec.name)] = vec
-
-    if not out:
-        raise ValueError("Не удалось сгенерировать ни одного ряда")
-
-    return pd.DataFrame(out)
+    return pd.DataFrame(cols)

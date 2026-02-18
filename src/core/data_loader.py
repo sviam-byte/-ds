@@ -38,6 +38,63 @@ class PreprocessReport:
             self.steps_by_column.setdefault(col, []).append(msg)
 
 
+def _detrend_linear_series(x: pd.Series) -> pd.Series:
+    """Удаляет линейный тренд ``a*t+b`` по OLS и возвращает остаток."""
+    y = pd.to_numeric(x, errors="coerce").astype(float)
+    n = len(y)
+    if n < 3 or y.notna().sum() < 3:
+        return y
+    t = np.arange(n, dtype=float)
+    mask = np.isfinite(y.values)
+    if mask.sum() < 3:
+        return y
+    tt = t[mask]
+    yy = y.values[mask]
+    A = np.column_stack([tt, np.ones_like(tt)])
+    try:
+        coef, *_ = np.linalg.lstsq(A, yy, rcond=None)
+        a, b = float(coef[0]), float(coef[1])
+        return pd.Series(y.values - (a * t + b), index=y.index)
+    except Exception:
+        return y
+
+
+def _deseasonalize_mean_series(x: pd.Series, period: int) -> pd.Series:
+    """Удаляет сезонность как среднее по фазам ``t mod period``."""
+    y = pd.to_numeric(x, errors="coerce").astype(float)
+    p = int(period)
+    if p < 2 or len(y) < p * 2:
+        return y
+    vals = y.values.copy()
+    idx = np.arange(len(vals), dtype=int)
+    out = vals.copy()
+    for k in range(p):
+        mask = (idx % p) == k
+        chunk = vals[mask]
+        mu = np.nanmean(chunk) if np.isfinite(chunk).any() else 0.0
+        out[mask] = chunk - mu
+    return pd.Series(out, index=y.index)
+
+
+def _prewhiten_ar1_series(x: pd.Series) -> pd.Series:
+    """AR(1)-prewhitening: ``y[t] - phi*y[t-1]`` с phi по OLS без константы."""
+    y = pd.to_numeric(x, errors="coerce").astype(float)
+    v = y.values.astype(float)
+    if len(v) < 3:
+        return y
+    x_prev = v[:-1]
+    x_curr = v[1:]
+    mask = np.isfinite(x_prev) & np.isfinite(x_curr)
+    if mask.sum() < 3:
+        return y
+    den = float(np.dot(x_prev[mask], x_prev[mask]))
+    phi = float(np.dot(x_curr[mask], x_prev[mask]) / den) if den > 1e-12 else 0.0
+    res = np.zeros_like(v)
+    res[0] = 0.0
+    res[1:] = v[1:] - phi * v[:-1]
+    return pd.Series(res, index=y.index)
+
+
 def _is_mostly_numeric_row(row) -> bool:
     """Проверяет, что в строке >=80% непустых значений приводятся к float."""
     vals = []
@@ -152,6 +209,11 @@ def preprocess_timeseries(
     enabled: bool = True,
     log_transform: bool = False,
     remove_outliers: bool = True,
+    outlier_mode: str = "nan",
+    detrend_linear: bool = False,
+    deseasonalize: bool = False,
+    seasonal_period: int = 0,
+    prewhiten_ar1: bool = False,
     normalize: bool = True,
     fill_missing: bool = True,
     check_stationarity: bool = False,
@@ -182,20 +244,52 @@ def preprocess_timeseries(
         out = out.applymap(lambda x: np.log(x) if x is not None and not np.isnan(x) and x > 0 else x)
 
     if remove_outliers:
+        mode = str(outlier_mode or "nan").lower()
+        if mode not in {"nan", "winsorize"}:
+            mode = "nan"
         for col in out.columns:
             if pd.api.types.is_numeric_dtype(out[col]):
-                series = out[col]
+                series = out[col].astype(float)
                 mean, std = series.mean(skipna=True), series.std(skipna=True)
                 if std > 0:
                     upper, lower = mean + DEFAULT_OUTLIER_Z * std, mean - DEFAULT_OUTLIER_Z * std
                     outliers = (series < lower) | (series > upper)
                     if outliers.any():
-                        report.add(f"[Preprocess] outliers->NaN: z>{DEFAULT_OUTLIER_Z} (n={int(outliers.sum())})", col=col)
-                        out.loc[outliers, col] = np.nan
+                        if mode == "winsorize":
+                            report.add(f"[Preprocess] outliers->clip: z>{DEFAULT_OUTLIER_Z} (n={int(outliers.sum())})", col=col)
+                            out.loc[series < lower, col] = lower
+                            out.loc[series > upper, col] = upper
+                        else:
+                            report.add(f"[Preprocess] outliers->NaN: z>{DEFAULT_OUTLIER_Z} (n={int(outliers.sum())})", col=col)
+                            out.loc[outliers, col] = np.nan
 
     if fill_missing:
         report.add("[Preprocess] fill_missing: linear interpolate + bfill/ffill")
         out = out.interpolate(method="linear", limit_direction="both", axis=0).bfill().ffill().fillna(0)
+
+    # Дополнительная предобработка выполняется после заполнения пропусков и до нормализации,
+    # чтобы не искажать оценки тренда/сезонности/AR(1) масштабированием.
+    if detrend_linear:
+        report.add("[Preprocess] detrend: linear trend removed")
+        for col in out.columns:
+            if pd.api.types.is_numeric_dtype(out[col]):
+                out[col] = _detrend_linear_series(out[col])
+
+    if deseasonalize:
+        p = int(seasonal_period or 0)
+        if p >= 2:
+            report.add(f"[Preprocess] deseasonalize: phase-mean removed (period={p})")
+            for col in out.columns:
+                if pd.api.types.is_numeric_dtype(out[col]):
+                    out[col] = _deseasonalize_mean_series(out[col], p)
+        else:
+            report.add("[Preprocess] deseasonalize: skipped (seasonal_period<2)")
+
+    if prewhiten_ar1:
+        report.add("[Preprocess] prewhiten: AR(1) residuals")
+        for col in out.columns:
+            if pd.api.types.is_numeric_dtype(out[col]):
+                out[col] = _prewhiten_ar1_series(out[col])
 
     if normalize:
         report.add("[Preprocess] normalize: z-score")
@@ -226,6 +320,11 @@ def load_or_generate(
     preprocess: bool = True,
     log_transform: bool = False,
     remove_outliers: bool = True,
+    outlier_mode: str = "nan",
+    detrend_linear: bool = False,
+    deseasonalize: bool = False,
+    seasonal_period: int = 0,
+    prewhiten_ar1: bool = False,
     normalize: bool = True,
     fill_missing: bool = True,
     check_stationarity: bool = False,
@@ -259,6 +358,11 @@ def load_or_generate(
             enabled=preprocess,
             log_transform=log_transform,
             remove_outliers=remove_outliers,
+            outlier_mode=outlier_mode,
+            detrend_linear=detrend_linear,
+            deseasonalize=deseasonalize,
+            seasonal_period=seasonal_period,
+            prewhiten_ar1=prewhiten_ar1,
             normalize=normalize,
             fill_missing=fill_missing,
             check_stationarity=check_stationarity,
