@@ -124,6 +124,10 @@ def _validate_ast(node: ast.AST, allowed_names: set[str], allowed_funcs: set[str
             # полезно для where(cond, a, b) не нужно; но оставляем для совместимости
             continue
         if isinstance(n, ast.keyword):
+            # Разрешаем только именованные аргументы вида f(arg=...).
+            # f(**payload) даёт n.arg is None и блокируется как потенциально опасный путь.
+            if n.arg is None:
+                raise UnsafeFormulaError("Распаковка **kwargs в вызовах запрещена")
             continue
 
         # Явно запрещаем всё остальное: Attribute, Subscript, Compare, BoolOp, IfExp, Comprehension, etc.
@@ -235,8 +239,12 @@ def safe_eval_vector(expr: str, *, env: Mapping[str, Any], names: Mapping[str, A
 
     arr = np.asarray(out, dtype=float)
     if arr.shape == ():
-        # скаляр -> растягиваем
+        # скаляр -> растягиваем до длины временной оси.
         arr = np.full((int(len(names["t"])),), float(arr), dtype=float)
+
+    # В отчёты ожидается ровно один временной ряд на формулу.
+    if arr.ndim != 1:
+        raise ValueError(f"Формула должна возвращать 1D-массив, получено ndim={arr.ndim}")
 
     if arr.shape[0] != len(names["t"]):
         raise ValueError(f"Формула вернула массив длины {arr.shape[0]}, ожидалась {len(names['t'])}")
