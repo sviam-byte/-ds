@@ -2377,8 +2377,7 @@ class BigMasterTool:
                             fq = float(t.get("metric", float("nan")))
                         except Exception:
                             fq = float("nan")
-                        if not np.isfinite(fq):
-                            continue
+                        valid = bool(np.isfinite(fq))
                         st0 = int(t.get("start", 0))
                         tid = f"cube_w{int(w)}_l{int(lg)}_s{st0}"
                         mat0 = t.get("matrix")
@@ -2391,7 +2390,8 @@ class BigMasterTool:
                             "id": tid,
                             "window_size": int(w), "lag": int(lg),
                             "start": st0, "end": int(t.get("end", st0 + int(w))),
-                            "metric": fq,
+                            "metric": float(fq) if valid else float("nan"),
+                            "valid": valid,
                             "matrix": mat0,
                         })
 
