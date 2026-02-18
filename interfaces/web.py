@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -36,8 +35,8 @@ def _parse_int_list_text(text: str) -> list[int] | None:
 
 
 
-
 def _make_run_dir(stem: str) -> Path:
+    """Создаёт уникальную папку запуска внутри SAVE_FOLDER/runs."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe = "".join(ch for ch in (stem or "run") if ch.isalnum() or ch in "-_ ").strip().replace(" ", "_")
     run_dir = Path(SAVE_FOLDER) / "runs" / f"{safe}_{ts}"
@@ -46,6 +45,7 @@ def _make_run_dir(stem: str) -> Path:
 
 
 def _maybe_reset_formula_defaults(preset: str) -> None:
+    """Сбрасывает формулы X/Y/Z при смене выбранного пресета."""
     defaults = {
         "Custom": {"x": "sin(2*pi*t/50) + 0.2*randn()", "y": "0.8*X + 0.3*randn()", "z": "rw(0.5)"},
         "Random": {"x": "randn()", "y": "randn()", "z": "randn()"},
@@ -60,10 +60,139 @@ def _maybe_reset_formula_defaults(preset: str) -> None:
         st.session_state["y_expr"] = d["y"]
         st.session_state["z_expr"] = d["z"]
 
+
+def _grid_from_minmax(min_v: int, max_v: int, step: int) -> list[int]:
+    """Строит безопасную сетку range(min_v..max_v, step)."""
+    step = max(1, int(step))
+    if max_v < min_v:
+        max_v = min_v
+    return list(range(int(min_v), int(max_v) + 1, step))
+
+
+def _sidebar_plan(
+    *,
+    source: str,
+    uploaded_file_name: str | None,
+    synth_name: str,
+    synth_params: dict,
+    selected_methods: list[str],
+    output_mode: str,
+    include_diagnostics: bool,
+    include_scans: bool,
+    include_matrix_tables: bool,
+    include_fft_plots: bool,
+    harmonic_top_k: int,
+    lag_selection: str,
+    lag: int,
+    max_lag: int,
+    use_main_windows: bool,
+    window_sizes_text: str,
+    window_policy: str,
+    window_stride_main: int,
+    scan_window_pos: bool,
+    scan_window_size: bool,
+    scan_lag: bool,
+    scan_cube: bool,
+    window_min: int,
+    window_max: int,
+    window_step: int,
+    window_size_default: int,
+    window_start_min: int,
+    window_start_max: int,
+    window_stride_scan: int,
+    window_max_windows: int,
+    lag_min: int,
+    lag_max: int,
+    lag_step: int,
+    cube_combo_limit: int,
+    cube_eval_limit: int,
+    cube_matrix_mode: str,
+    cube_matrix_limit: int,
+) -> None:
+    """Показывает в сайдбаре краткий план текущего запуска и ожидаемые файлы."""
+    with st.sidebar:
+        st.header("План вывода")
+        st.caption(f"База сохранения: {SAVE_FOLDER} / runs / …")
+
+        st.subheader("Данные")
+        if source.startswith("Файл"):
+            st.write("Источник: файл")
+            st.write(f"Имя: {uploaded_file_name or '—'}")
+        else:
+            st.write("Источник: синтетика (формулы)")
+            st.write(f"Имя набора: {synth_name or 'synthetic'}")
+            if synth_params:
+                with st.expander("Параметры синтетики", expanded=False):
+                    st.write(f"n_samples={synth_params.get('n_samples')}")
+                    st.write(f"dt={synth_params.get('dt')}")
+                    st.write(f"seed={synth_params.get('seed')}")
+
+        st.subheader("Методы")
+        st.write(f"Выбрано: {len(selected_methods)}")
+        if selected_methods:
+            st.caption(", ".join(selected_methods[:8]) + (" …" if len(selected_methods) > 8 else ""))
+
+        st.subheader("Основной расчёт")
+        if lag_selection == "fixed":
+            st.write(f"Лаг: фиксированный ({lag})")
+        else:
+            st.write(f"Лаг: подбор (max_lag={max_lag})")
+        if use_main_windows:
+            st.write(f"Окна: да ({window_policy})")
+            st.caption(f"window_sizes: {window_sizes_text or '—'}")
+            st.caption(f"stride: {'auto' if window_stride_main == 0 else window_stride_main}")
+        else:
+            st.write("Окна: нет (полный интервал)")
+
+        st.subheader("Сканы в отчёте")
+        if not include_scans:
+            st.write("Выключены")
+        else:
+            flags = []
+            if scan_window_pos:
+                flags.append("позиция окна")
+            if scan_window_size:
+                flags.append("длина окна")
+            if scan_lag:
+                flags.append("лаг")
+            if scan_cube:
+                flags.append("куб")
+            st.write("Включено: " + (", ".join(flags) if flags else "—"))
+
+            w_grid = _grid_from_minmax(window_min, window_max, window_step)
+            l_grid = _grid_from_minmax(lag_min, lag_max, lag_step)
+            st.caption(f"Окна (grid): {len(w_grid)} шт.")
+            st.caption(f"Лаги (grid): {len(l_grid)} шт.")
+            if scan_window_pos:
+                st.caption(
+                    f"pos-scan: w={window_size_default}, start=[{window_start_min},{window_start_max}], "
+                    f"stride={'auto' if window_stride_scan == 0 else window_stride_scan}, max_windows={window_max_windows}"
+                )
+            if scan_cube:
+                combos_total = len(w_grid) * len(l_grid)
+                combos_used = min(int(cube_combo_limit), int(combos_total))
+                st.caption(f"cube: combos ≤ {combos_used}/{combos_total}, eval_limit={cube_eval_limit}")
+                st.caption(f"cube: matrix_mode={cube_matrix_mode}, matrix_limit={cube_matrix_limit}")
+
+        st.subheader("Файлы")
+        stem = Path(uploaded_file_name).stem if uploaded_file_name else (synth_name or "synthetic")
+        st.caption(f"{stem}_series.xlsx")
+        if output_mode in {"excel", "both"}:
+            st.caption(f"{stem}_full.xlsx")
+        if output_mode in {"html", "both"}:
+            st.caption(f"{stem}_report.html")
+            st.caption(
+                "HTML: "
+                + f"диагностика={'да' if include_diagnostics else 'нет'}, "
+                + f"сканы={'да' if include_scans else 'нет'}, "
+                + f"матрицы={'да' if include_matrix_tables else 'нет'}, "
+                + f"FFT={'да' if include_fft_plots else 'нет'} (top_k={harmonic_top_k})"
+            )
+
 def main() -> None:
-    st.set_page_config(page_title="Анализ Временных Рядов (Локально)", layout="wide")
-    st.title("Анализ Связности Временных Рядов")
-    st.caption(f"Локальная версия. Результаты сохраняются в папку: {SAVE_FOLDER}")
+    st.set_page_config(page_title="Анализ временных рядов", layout="wide")
+    st.title("Анализ связности временных рядов")
+    st.caption(f"Сохранение результатов: {SAVE_FOLDER}")
 
     source = st.radio(
         "Источник данных",
@@ -76,32 +205,34 @@ def main() -> None:
     synth_df: pd.DataFrame | None = None
     synth_name = "synthetic"
 
+    synth_params: dict = {}
+
     if source.startswith("Файл"):
-        uploaded_file = st.file_uploader("Выберите файл", type=["csv", "xlsx"])
+        uploaded_file = st.file_uploader("Загрузить файл", type=["csv", "xlsx"], help="CSV или Excel с колонками-рядов")
     else:
-        with st.expander("Синтетика: формулы X/Y/Z", expanded=True):
+        with st.expander("Синтетика по формулам (X/Y/Z)", expanded=True):
             c0, c1, c2 = st.columns(3)
             with c0:
                 preset = st.selectbox(
-                    "Шаблон",
+                    "Шаблон генерации",
                     ["Custom", "Random", "Linear + noise", "Sin/Cos coupling", "AR(1)"],
                     index=2,
                 )
                 _maybe_reset_formula_defaults(preset)
             with c1:
-                n_samples = st.number_input("n_samples", min_value=20, max_value=200000, value=800, step=10, key="n_samples")
-                dt = st.number_input("dt", min_value=0.0001, max_value=1000.0, value=1.0, step=0.1, format="%.4f", key="dt")
+                n_samples = st.number_input("Длина ряда (n_samples)", min_value=20, max_value=200000, value=800, step=10, key="n_samples")
+                dt = st.number_input("Шаг времени (dt)", min_value=0.0001, max_value=1000.0, value=1.0, step=0.1, format="%.4f", key="dt")
             with c2:
-                seed = st.number_input("seed", min_value=0, max_value=10_000_000, value=42, step=1, key="seed")
+                seed = st.number_input("Seed", min_value=0, max_value=10_000_000, value=42, step=1, key="seed")
 
             st.caption(
                 "Переменные: t (время), X (первый ряд), Y (второй), Z (третий). Функции: sin, cos, exp, log, sqrt, "
                 "randn(scale=1), rw(scale=1), ar1(phi=0.7, scale=1)."
             )
 
-            x_expr = st.text_input("X(t) =", key="x_expr")
-            y_expr = st.text_input("Y(t, X) =", key="y_expr")
-            z_expr = st.text_input("Z(t, X, Y) =", key="z_expr")
+            x_expr = st.text_input("Формула X(t)", key="x_expr")
+            y_expr = st.text_input("Формула Y(t, X)", key="y_expr")
+            z_expr = st.text_input("Формула Z(t, X, Y)", key="z_expr")
 
             synth_name = st.text_input("Имя набора (для папки/файлов)", value=synth_name)
 
@@ -118,13 +249,22 @@ def main() -> None:
                         ],
                     )
                     st.success(f"OK: shape={synth_df.shape}")
-                    with st.expander("Preview рядов", expanded=False):
+                    with st.expander("Ряды (preview)", expanded=False):
                         st.line_chart(synth_df)
                         st.dataframe(synth_df.head(200))
                 except Exception as e:
                     st.error(f"Ошибка генерации: {e}")
 
-    with st.expander("Параметры запуска", expanded=True):
+            synth_params = {
+                "n_samples": int(n_samples),
+                "dt": float(dt),
+                "seed": int(seed),
+                "x_expr": x_expr,
+                "y_expr": y_expr,
+                "z_expr": z_expr,
+            }
+
+    with st.expander("Настройки анализа", expanded=True):
         colA, colB, colC = st.columns(3)
         with colA:
             lag_selection = st.selectbox("Выбор лага (основной расчёт)", ["optimize", "fixed"], index=0)
@@ -146,7 +286,7 @@ def main() -> None:
             log_transform = st.checkbox("Лог-преобразование (только >0)", value=False)
 
         with colC:
-            output_mode = st.selectbox("Режим вывода", ["both", "html", "excel"], index=0)
+            output_mode = st.selectbox("Вывод", ["both", "html", "excel"], index=0)
             include_diagnostics = st.checkbox("HTML: показывать диагностику", value=True)
             include_scans = st.checkbox("HTML: показывать сканы (окна/лаги/куб)", value=True)
             include_matrix_tables = st.checkbox("HTML: показывать таблицу матрицы (текстом)", value=False)
@@ -220,11 +360,54 @@ def main() -> None:
         )
 
     all_methods = STABLE_METHODS + EXPERIMENTAL_METHODS
-    selected_methods = st.multiselect("Выберите методы", all_methods, default=STABLE_METHODS[:2])
+    selected_methods = st.multiselect("Методы связи", all_methods, default=STABLE_METHODS[:2])
+
+    _sidebar_plan(
+        source=source,
+        uploaded_file_name=(uploaded_file.name if uploaded_file else None),
+        synth_name=synth_name,
+        synth_params=synth_params,
+        selected_methods=list(selected_methods or []),
+        output_mode=str(output_mode),
+        include_diagnostics=bool(include_diagnostics),
+        include_scans=bool(include_scans),
+        include_matrix_tables=bool(include_matrix_tables),
+        include_fft_plots=bool(include_fft_plots),
+        harmonic_top_k=int(harmonic_top_k),
+        lag_selection=str(lag_selection),
+        lag=int(lag),
+        max_lag=int(max_lag),
+        use_main_windows=bool(use_main_windows),
+        window_sizes_text=str(window_sizes_text),
+        window_policy=str(window_policy),
+        window_stride_main=int(window_stride_main),
+        scan_window_pos=bool(scan_window_pos),
+        scan_window_size=bool(scan_window_size),
+        scan_lag=bool(scan_lag),
+        scan_cube=bool(scan_cube),
+        window_min=int(window_min),
+        window_max=int(window_max),
+        window_step=int(window_step),
+        window_size_default=int(window_size_default),
+        window_start_min=int(window_start_min),
+        window_start_max=int(window_start_max),
+        window_stride_scan=int(window_stride_scan),
+        window_max_windows=int(window_max_windows),
+        lag_min=int(lag_min),
+        lag_max=int(lag_max),
+        lag_step=int(lag_step),
+        cube_combo_limit=int(cube_combo_limit),
+        cube_eval_limit=int(cube_eval_limit),
+        cube_matrix_mode=str(cube_matrix_mode),
+        cube_matrix_limit=int(cube_matrix_limit),
+    )
 
     if st.button("Запустить анализ", type="primary"):
         if source.startswith("Файл") and not uploaded_file:
-            st.error("Файл не загружен!")
+            st.error("Файл не загружен")
+            return
+        if not selected_methods:
+            st.error("Не выбраны методы")
             return
 
         # Готовим run-dir
